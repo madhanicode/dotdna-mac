@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent, FormEvent, useMemo, useRef, useState } from "react";
+import { AnalysisPanels } from "./AnalysisPanels";
 import { parseSnapGene, SnapGeneData, SnapGeneFeature, toFasta } from "./snapgene";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -179,7 +180,7 @@ export default function Home() {
           <h1>Your DNA sequence,<br /><em>out in the open.</em></h1>
           <p className="lede">
             Drop in a SnapGene <code>.dna</code> file. Get the full sequence,
-            useful stats, annotations, and a clean FASTA export in seconds.
+            useful stats, annotations, ORFs, restriction sites, and a clean FASTA export in seconds.
           </p>
           <div className="hero-proof" aria-label="Product benefits">
             <span>No account</span>
@@ -292,6 +293,8 @@ export default function Home() {
             )}
             <p className="session-note">Added annotations stay in this browser session and do not change the original SnapGene file.</p>
           </section>
+
+          <AnalysisPanels sequence={data.sequence} circular={data.circular} />
 
           <div className="result-layout">
             <div className="sequence-panel">
