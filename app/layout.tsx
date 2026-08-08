@@ -13,17 +13,17 @@ export async function generateMetadata(): Promise<Metadata> {
   const ogImage = `${protocol}://${host}/og.png`;
 
   return {
-    title: "DOTDNA — SnapGene Sequence Reader",
-    description: "Open a SnapGene .dna file and instantly copy or export its DNA sequence. Private, fast, and entirely in your browser.",
+    title: "DOTDNA — Local DNA Workspace",
+    description: "Open, map, edit, annotate, analyze, and export SnapGene, GenBank, FASTA, and pasted DNA entirely in your browser.",
     openGraph: {
-      title: "DOTDNA — SnapGene Sequence Reader",
-      description: "Open a SnapGene file. Get the sequence.",
-      images: [{ url: ogImage, width: 1730, height: 909, alt: "DOTDNA SnapGene sequence reader" }],
+      title: "DOTDNA — Local DNA Workspace",
+      description: "Map, edit, annotate, design primers, simulate PCR and digests, translate, and export—without uploading your DNA.",
+      images: [{ url: ogImage, width: 1730, height: 909, alt: "DOTDNA local DNA workspace" }],
     },
     twitter: {
       card: "summary_large_image",
-      title: "DOTDNA — SnapGene Sequence Reader",
-      description: "Open a SnapGene file. Get the sequence.",
+      title: "DOTDNA — Local DNA Workspace",
+      description: "A private browser workspace for everyday DNA sequence work.",
       images: [ogImage],
     },
   };

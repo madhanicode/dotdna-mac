@@ -17,10 +17,10 @@ test("server-renders the DOTDNA reader", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /<title>DOTDNA — SnapGene Sequence Reader<\/title>/i);
+  assert.match(html, /<title>DOTDNA — Local DNA Workspace<\/title>/i);
   assert.match(html, /Your DNA sequence/);
-  assert.match(html, /Choose SnapGene file/);
-  assert.match(html, /annotations/);
+  assert.match(html, /Choose file/);
+  assert.match(html, /annotate/);
   assert.match(html, /Processed locally/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });

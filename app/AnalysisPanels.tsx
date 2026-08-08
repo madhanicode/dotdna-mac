@@ -97,7 +97,7 @@ export function AnalysisPanels({ sequence, circular }: Props) {
   }
 
   return (
-    <section className="analysis-suite" aria-labelledby="analysis-heading">
+    <section className="analysis-suite" id="analysis" aria-labelledby="analysis-heading">
       <div className="analysis-suite-heading">
         <div>
           <span className="panel-kicker">SEQUENCE ANALYSIS</span>

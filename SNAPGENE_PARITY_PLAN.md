@@ -18,10 +18,13 @@ This roadmap inventories SnapGene’s publicly documented capability surface and
 | Area | Current capability | Next fidelity target |
 |---|---|---|
 | SnapGene reading | Validates and indexes every packet; decodes sequence, topology, multisegment/directional features, qualifiers, primers, notes, end chemistry, enzyme visibility, and format metadata | Decode proprietary binary display, enzyme-data, alignment, and history payloads against a representative corpus |
-| Sequence view | Full sequence, coordinates, motif search, copy, FASTA export | Inline overlays, selection, zoom, editing, translations, primers, and cut markers |
-| Features | Displays linear and interactive circular annotation maps; reads multi-segment features, directionality, qualifiers; adds/removes session annotations | CDS translation, introns, point features, editing/persistence, import/export |
+| Sequence view | Full sequence, coordinates, motif search, copy, FASTA/GenBank/project export, insert/delete/replace, reverse complement, topology changes, undo/redo | Inline overlays, synchronized selection, zoom, direct base editing, translations, primers, and cut markers |
+| Features | Displays linear and interactive circular maps; reads multi-segment features, directionality, qualifiers; adds/edits/removes annotations and remaps them across sequence edits | CDS translation, introns, point-feature UI, rich qualifier editing, persistent project library |
 | ORFs | Six-frame prediction, forward/reverse colors, minimum length and start-codon controls | Alternate genetic codes, no-start/incomplete ORFs, circular edge-case validation, convert ORF to CDS |
 | Restriction sites | Searchable Type II/Type IIS catalog, cutter filters, circular-origin matching, cut geometry, multi-enzyme fragment calculation, and virtual gel lane | Full curated enzyme database, methylation sensitivity, enzyme sets, partial digests, and configurable gel conditions |
+| Primers and PCR | Primer library, GC/Tm/MW calculations, exact forward/reverse binding, inward-facing PCR products, amplicon FASTA export | Mismatches/tails, secondary structure, richer thermodynamics, automatic design, inverse/overlap PCR, mutagenesis |
+| Translation | Whole-sequence six-frame translation and protein FASTA export | Genetic codes, translated feature editing, introns/frameshifts, protein properties, ORF-to-CDS |
+| Interoperability | Opens SnapGene, GenBank, FASTA, plain DNA, and portable DOTDNA projects; exports FASTA, annotated GenBank, project JSON, map PNG, protein, and amplicon | EMBL/GFF/BED, additional vendor formats, SnapGene round-trip writing, batch conversion |
 
 ## Complete capability inventory
 
@@ -171,14 +174,14 @@ Estimates are rough single-team engineering ranges and should be refined after t
 - Independent full enzyme dataset, cut geometry, overhangs, methylation, enzyme sets, noncutters, fragment sizes, and digest engine.
 - Deliverable: analysis parity for translations, ORFs, restriction sites, and digests.
 
-### Phase 3 — editor, annotations, and formats (5–8 weeks)
+### Phase 3 — editor, annotations, and formats (partially complete; 5–8 weeks total)
 
 - Transactional sequence editing, ends/topology, multi-segment features, qualifiers, primers, custom feature types, and undo/redo command bus.
 - GenBank/EMBL/GFF/BED/FASTA/protein import/export plus map/PDF/image exports.
 - History model begins recording all edits and imports.
 - Deliverable: day-to-day sequence editing and annotation parity.
 
-### Phase 4 — primers, PCR, and mutagenesis (5–8 weeks)
+### Phase 4 — primers, PCR, and mutagenesis (partially complete; 5–8 weeks total)
 
 - Primer thermodynamics/design, overlays, ordering exports, PCR/inverse PCR/overlap PCR, mutagenesis, amplicon products, and warnings.
 - Validate calculations with published standards and independently generated fixtures.
@@ -218,10 +221,10 @@ Estimates are rough single-team engineering ranges and should be refined after t
 - Privacy is explicit: local processing by default, clear consent for every network operation, and no hidden analytics on sequence contents.
 - Parity claims require workflow-level acceptance tests against current official documentation and a legally obtained reference installation.
 
-## Immediate next sprint after the circular-map and digest milestone
+## Immediate next sprint after the workspace expansion
 
-1. Add synchronized selection, zoom, and editable feature geometry across circular, linear, and sequence views.
-2. Decode history/alignment/display binary packets against a legally obtained multi-version fixture corpus.
-3. Convert predicted ORFs into editable CDS annotations with translated protein export.
-4. Expand the enzyme catalog with overhang display, methylation sensitivity, supplier sets, and partial digests.
-5. Establish the history command model before sequence editing begins.
+1. Add synchronized selection, zoom, and inline overlays across circular, linear, and sequence views.
+2. Upgrade primer thermodynamics and add automatic sequencing/PCR primer design, mismatches, tails, inverse PCR, and overlap PCR.
+3. Convert predicted ORFs into editable CDS annotations and add translated-feature/intron support.
+4. Add cloning/assembly product engines beginning with restriction cloning, Gibson/HiFi, and Golden Gate.
+5. Decode history/alignment/display binary packets and introduce saved local project collections with explicit privacy controls.

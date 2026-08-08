@@ -3,14 +3,29 @@
 import { ChangeEvent, DragEvent, FormEvent, useMemo, useRef, useState } from "react";
 import { AnalysisPanels } from "./AnalysisPanels";
 import { DocumentInspector } from "./DocumentInspector";
+import { MolecularTools } from "./MolecularTools";
 import { PlasmidMap } from "./PlasmidMap";
-import { parseSnapGene, SnapGeneData, SnapGeneFeature, toFasta } from "./snapgene";
+import { SequenceEditor } from "./SequenceEditor";
+import { applySequenceEdit, SequenceEdit } from "./sequence-edit";
+import { parseTextSequence, toDotDnaProject, toGenBank } from "./sequence-formats";
+import { parseSnapGene, SnapGeneData, SnapGeneFeature, SnapGenePrimer, toFasta, updateSequenceData } from "./snapgene";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 
 type DisplayAnnotation = SnapGeneFeature & {
   id: string;
   isCustom: boolean;
+};
+
+type HistoryEntry = {
+  description: string;
+  timestamp: string;
+};
+
+type WorkspaceSnapshot = {
+  data: SnapGeneData;
+  customAnnotations: DisplayAnnotation[];
+  history: HistoryEntry[];
 };
 
 function coordinates(range: string | null) {
@@ -55,6 +70,15 @@ export default function Home() {
   const [annotationType, setAnnotationType] = useState("misc_feature");
   const [annotationColor, setAnnotationColor] = useState("#17b6c9");
   const [annotationError, setAnnotationError] = useState("");
+  const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
+  const [showPasteImport, setShowPasteImport] = useState(false);
+  const [pastedName, setPastedName] = useState("pasted-sequence.dna");
+  const [pastedSequence, setPastedSequence] = useState("");
+  const [pastedCircular, setPastedCircular] = useState(false);
+  const [importFormat, setImportFormat] = useState("SnapGene");
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [undoStack, setUndoStack] = useState<WorkspaceSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<WorkspaceSnapshot[]>([]);
 
   const formattedSequence = useMemo(
     () => (data ? formatSequence(data.sequence) : ""),
@@ -76,23 +100,107 @@ export default function Home() {
     [data, customAnnotations],
   );
 
+  function loadWorkspace(nextData: SnapGeneData, nextName: string, format: string) {
+    setData(nextData);
+    setFileName(nextName);
+    setImportFormat(format);
+    setMotif("");
+    setCustomAnnotations([]);
+    setShowAnnotationForm(false);
+    setEditingAnnotationId(null);
+    setAnnotationError("");
+    setHistory([]);
+    setUndoStack([]);
+    setRedoStack([]);
+    setShowPasteImport(false);
+    setPastedSequence("");
+  }
+
+  function currentSnapshot(): WorkspaceSnapshot | null {
+    return data ? { data, customAnnotations, history } : null;
+  }
+
+  function commitWorkspace(nextData: SnapGeneData, nextCustomAnnotations: DisplayAnnotation[], description: string) {
+    const snapshot = currentSnapshot();
+    if (snapshot) setUndoStack((current) => [...current, snapshot]);
+    setRedoStack([]);
+    setData(nextData);
+    setCustomAnnotations(nextCustomAnnotations);
+    setHistory((current) => [...current, { description, timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }]);
+  }
+
+  function undo() {
+    const previous = undoStack.at(-1);
+    const snapshot = currentSnapshot();
+    if (!previous || !snapshot) return;
+    setUndoStack((current) => current.slice(0, -1));
+    setRedoStack((current) => [...current, snapshot]);
+    setData(previous.data);
+    setCustomAnnotations(previous.customAnnotations);
+    setHistory(previous.history);
+  }
+
+  function redo() {
+    const next = redoStack.at(-1);
+    const snapshot = currentSnapshot();
+    if (!next || !snapshot) return;
+    setRedoStack((current) => current.slice(0, -1));
+    setUndoStack((current) => [...current, snapshot]);
+    setData(next.data);
+    setCustomAnnotations(next.customAnnotations);
+    setHistory(next.history);
+  }
+
+  function applyEdit(edit: SequenceEdit) {
+    if (!data) return;
+    const fileResult = applySequenceEdit(data.sequence, data.features, edit);
+    const customResult = applySequenceEdit(data.sequence, customAnnotations, edit);
+    const nextCustom = customResult.features as DisplayAnnotation[];
+    commitWorkspace(updateSequenceData(data, fileResult.sequence, { features: fileResult.features }), nextCustom, fileResult.description);
+  }
+
+  function changeTopology(circular: boolean) {
+    if (!data || data.circular === circular) return;
+    commitWorkspace(updateSequenceData(data, data.sequence, { circular }), customAnnotations, circular ? "Circularized the sequence" : "Linearized the sequence");
+  }
+
+  function changePrimers(primers: SnapGenePrimer[], description: string) {
+    if (!data) return;
+    commitWorkspace(updateSequenceData(data, data.sequence, { primers }), customAnnotations, description);
+  }
+
   async function readFile(file?: File) {
     if (!file) return;
     setError("");
     setCopied(false);
 
     try {
-      const parsed = parseSnapGene(await file.arrayBuffer());
-      setData(parsed);
-      setFileName(file.name);
-      setMotif("");
-      setCustomAnnotations([]);
-      setShowAnnotationForm(false);
-      setAnnotationError("");
+      const buffer = await file.arrayBuffer();
+      try {
+        const parsed = parseSnapGene(buffer);
+        loadWorkspace(parsed, file.name, "SnapGene");
+      } catch {
+        const imported = parseTextSequence(file.name, new TextDecoder().decode(buffer));
+        loadWorkspace(imported.data, imported.name || file.name, imported.format);
+      }
     } catch (caught) {
       setData(null);
       setFileName("");
       setError(caught instanceof Error ? caught.message : "I couldn’t read that file.");
+    }
+  }
+
+  function importPastedSequence(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    try {
+      const imported = parseTextSequence(pastedName.trim() || "pasted-sequence.dna", pastedSequence);
+      const nextData = imported.format === "Plain DNA" || imported.format === "FASTA"
+        ? updateSequenceData(imported.data, imported.data.sequence, { circular: pastedCircular })
+        : imported.data;
+      loadWorkspace(nextData, imported.name, imported.format);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "I couldn’t read that sequence.");
     }
   }
 
@@ -114,17 +222,29 @@ export default function Home() {
     window.setTimeout(() => setCopied(false), 1800);
   }
 
-  function downloadFasta() {
-    if (!data) return;
-    const blob = new Blob([toFasta(fileName, data.sequence)], {
-      type: "text/plain;charset=utf-8",
-    });
+  function downloadText(name: string, contents: string, type = "text/plain;charset=utf-8") {
+    const blob = new Blob([contents], { type });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = fileName.replace(/\.dna$/i, "") + ".fasta";
+    link.download = name;
     link.click();
     URL.revokeObjectURL(url);
+  }
+
+  function downloadFasta() {
+    if (!data) return;
+    downloadText(fileName.replace(/\.[^.]+$/i, "") + ".fasta", toFasta(fileName, data.sequence));
+  }
+
+  function downloadGenBank() {
+    if (!data) return;
+    downloadText(fileName.replace(/\.[^.]+$/i, "") + ".gb", toGenBank(fileName, data, annotations));
+  }
+
+  function downloadProject() {
+    if (!data) return;
+    downloadText(fileName.replace(/\.[^.]+$/i, "") + ".dotdna.json", toDotDnaProject(fileName, data, annotations), "application/json;charset=utf-8");
   }
 
   function addAnnotation(event: FormEvent<HTMLFormElement>) {
@@ -144,27 +264,59 @@ export default function Home() {
       return;
     }
 
-    setCustomAnnotations((current) => [
-      ...current,
-      {
-        id: `added-${Date.now()}`,
-        isCustom: true,
-        name,
-        type: annotationType.trim() || "misc_feature",
-        range: `${start}-${end}`,
-        color: annotationColor,
-        directionality: 1,
-        strand: "+",
-        segments: [{ range: `${start}-${end}`, start, end, color: annotationColor, name: null, type: "standard" }],
-        qualifiers: [],
-        readingFrame: null,
-      },
-    ]);
+    const existing = editingAnnotationId ? annotations.find(({ id }) => id === editingAnnotationId) : null;
+    const annotation: DisplayAnnotation = {
+      ...(existing ?? {} as DisplayAnnotation),
+      id: existing?.id ?? `added-${Date.now()}`,
+      isCustom: existing?.isCustom ?? true,
+      name,
+      type: annotationType.trim() || "misc_feature",
+      range: `${start}-${end}`,
+      color: annotationColor,
+      directionality: 1,
+      strand: "+",
+      segments: [{ range: `${start}-${end}`, start, end, color: annotationColor, name: null, type: "standard" }],
+      qualifiers: [],
+      readingFrame: null,
+    };
+    if (existing && !existing.isCustom) {
+      const fileIndex = Number(existing.id.replace("file-", ""));
+      const nextFeatures = data.features.map((feature, index) => index === fileIndex ? annotation : feature);
+      commitWorkspace(updateSequenceData(data, data.sequence, { features: nextFeatures }), customAnnotations, `Edited annotation ${name}`);
+    } else if (existing) {
+      commitWorkspace(data, customAnnotations.map((feature) => feature.id === existing.id ? annotation : feature), `Edited annotation ${name}`);
+    } else {
+      commitWorkspace(data, [...customAnnotations, annotation], `Added annotation ${name}`);
+    }
     setAnnotationName("");
     setAnnotationStart("1");
     setAnnotationEnd("");
     setAnnotationError("");
     setShowAnnotationForm(false);
+    setEditingAnnotationId(null);
+  }
+
+  function editAnnotation(feature: DisplayAnnotation) {
+    const position = coordinates(feature.range);
+    setEditingAnnotationId(feature.id);
+    setAnnotationName(feature.name);
+    setAnnotationType(feature.type);
+    setAnnotationStart(String(position?.start ?? 1));
+    setAnnotationEnd(String(position?.end ?? data?.length ?? ""));
+    setAnnotationColor(feature.color ?? "#17b6c9");
+    setAnnotationError("");
+    setShowAnnotationForm(true);
+    document.querySelector("#annotations")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function removeAnnotation(feature: DisplayAnnotation) {
+    if (!data) return;
+    if (feature.isCustom) {
+      commitWorkspace(data, customAnnotations.filter((item) => item.id !== feature.id), `Removed annotation ${feature.name}`);
+      return;
+    }
+    const fileIndex = Number(feature.id.replace("file-", ""));
+    commitWorkspace(updateSequenceData(data, data.sequence, { features: data.features.filter((_, index) => index !== fileIndex) }), customAnnotations, `Removed annotation ${feature.name}`);
   }
 
   return (
@@ -186,9 +338,8 @@ export default function Home() {
           <p className="eyebrow">SnapGene sequence reader</p>
           <h1>Your DNA sequence,<br /><em>out in the open.</em></h1>
           <p className="lede">
-            Drop in a SnapGene <code>.dna</code> file. Get the full sequence,
-            a circular plasmid map, document metadata, annotations, ORFs, restriction digests,
-            and a clean FASTA export in seconds.
+            Open SnapGene, GenBank, FASTA, DOTDNA projects, or paste raw DNA. Map, edit,
+            annotate, design primers, simulate PCR and digests, translate, and export—all locally.
           </p>
           <div className="hero-proof" aria-label="Product benefits">
             <span>No account</span>
@@ -205,21 +356,32 @@ export default function Home() {
           onDrop={handleDrop}
         >
           <div className="corner-label">01 / OPEN</div>
-          <div className="drop-icon" aria-hidden="true">
-            <span>↓</span>
-          </div>
-          <h2>{isDragging ? "Release to read" : "Drop your .dna file here"}</h2>
-          <p>or choose one from your computer</p>
-          <button className="primary-button" type="button" onClick={() => inputRef.current?.click()}>
-            Choose SnapGene file <span aria-hidden="true">↗</span>
-          </button>
-          <input
-            ref={inputRef}
-            className="visually-hidden"
-            type="file"
-            accept=".dna,application/octet-stream"
-            onChange={handleInput}
-          />
+          {showPasteImport ? (
+            <form className="paste-import-form" onSubmit={importPastedSequence}>
+              <div className="paste-form-heading"><div><span>PASTE OR IMPORT TEXT</span><h2>Start from sequence text</h2></div><button type="button" onClick={() => { setShowPasteImport(false); setError(""); }} aria-label="Close pasted sequence form">×</button></div>
+              <label><span>Document name</span><input value={pastedName} onChange={(event) => setPastedName(event.target.value)} /></label>
+              <label><span>DNA, FASTA, GenBank, or DOTDNA project</span><textarea value={pastedSequence} onChange={(event) => setPastedSequence(event.target.value)} placeholder=">my_sequence&#10;ACGT…" spellCheck={false} autoFocus /></label>
+              <label className="paste-topology"><input type="checkbox" checked={pastedCircular} onChange={(event) => setPastedCircular(event.target.checked)} /><span>Treat raw DNA or FASTA as circular</span></label>
+              <button className="primary-button" type="submit">Open sequence <span aria-hidden="true">↗</span></button>
+            </form>
+          ) : (
+            <>
+              <div className="drop-icon" aria-hidden="true"><span>↓</span></div>
+              <h2>{isDragging ? "Release to read" : "Drop a sequence file here"}</h2>
+              <p>.dna · .gb · .fasta · .dotdna.json · text</p>
+              <div className="import-actions">
+                <button className="primary-button" type="button" onClick={() => inputRef.current?.click()}>Choose file <span aria-hidden="true">↗</span></button>
+                <button className="ghost-button" type="button" onClick={() => { setShowPasteImport(true); setError(""); }}>Paste sequence</button>
+              </div>
+              <input
+                ref={inputRef}
+                className="visually-hidden"
+                type="file"
+                accept=".dna,.gb,.gbk,.genbank,.fa,.fas,.fasta,.fna,.json,.dotdna,.txt,application/octet-stream,text/plain,application/json"
+                onChange={handleInput}
+              />
+            </>
+          )}
           <div className="local-processing">
             <span className="lock-dot" aria-hidden="true" />
             Processed locally. Your sequence stays private.
@@ -230,18 +392,29 @@ export default function Home() {
 
       {data ? (
         <section className="results" aria-live="polite">
+          <nav className="workspace-nav" aria-label="Sequence workspace">
+            <a href="#map">Map</a>
+            <a href="#annotations">Annotations</a>
+            <a href="#analysis">ORFs &amp; enzymes</a>
+            <a href="#primers">Primers &amp; PCR</a>
+            <a href="#editor">Edit</a>
+            <a href="#sequence">Sequence</a>
+            <a href="#file-details">File details</a>
+          </nav>
           <div className="result-heading">
             <div>
-              <p className="eyebrow cyan">Sequence decoded</p>
+              <p className="eyebrow cyan">{importFormat} workspace</p>
               <h2>{fileName}</h2>
             </div>
             <div className="result-actions">
               <button type="button" className="secondary-button" onClick={copySequence}>
                 {copied ? "Copied!" : "Copy sequence"}
               </button>
-              <button type="button" className="primary-button compact" onClick={downloadFasta}>
-                Download FASTA <span aria-hidden="true">↓</span>
-              </button>
+              <details className="export-menu">
+                <summary className="primary-button compact">Export <span aria-hidden="true">↓</span></summary>
+                <div><button type="button" onClick={downloadFasta}>FASTA sequence</button><button type="button" onClick={downloadGenBank}>GenBank + annotations</button><button type="button" onClick={downloadProject}>DOTDNA project</button></div>
+              </details>
+              <button type="button" className="new-file-button" onClick={() => { setData(null); setFileName(""); setError(""); setHistory([]); setUndoStack([]); setRedoStack([]); }}>New</button>
             </div>
           </div>
 
@@ -254,7 +427,7 @@ export default function Home() {
 
           <PlasmidMap fileName={fileName} sequence={data.sequence} circular={data.circular} features={annotations} />
 
-          <section className="annotation-section" aria-labelledby="annotation-heading">
+          <section className="annotation-section" id="annotations" aria-labelledby="annotation-heading">
             <div className="annotation-header">
               <div>
                 <span className="panel-kicker">ANNOTATION MAP</span>
@@ -263,7 +436,7 @@ export default function Home() {
               <button
                 type="button"
                 className={showAnnotationForm ? "secondary-button" : "primary-button compact"}
-                onClick={() => { setShowAnnotationForm((current) => !current); setAnnotationError(""); }}
+                onClick={() => { const opening = !showAnnotationForm; setShowAnnotationForm(opening); setEditingAnnotationId(null); setAnnotationError(""); if (opening) { setAnnotationName(""); setAnnotationStart("1"); setAnnotationEnd(""); setAnnotationType("misc_feature"); setAnnotationColor("#17b6c9"); } }}
               >
                 {showAnnotationForm ? "Cancel" : "+ Add annotation"}
               </button>
@@ -276,7 +449,7 @@ export default function Home() {
                 <label><span>End</span><input type="number" min="1" max={data.length} value={annotationEnd} onChange={(event) => setAnnotationEnd(event.target.value)} placeholder={String(data.length)} /></label>
                 <label><span>Type</span><input value={annotationType} onChange={(event) => setAnnotationType(event.target.value)} /></label>
                 <label className="color-field"><span>Color</span><input type="color" value={annotationColor} onChange={(event) => setAnnotationColor(event.target.value)} /></label>
-                <button type="submit" className="primary-button compact">Save annotation <span aria-hidden="true">↗</span></button>
+                <button type="submit" className="primary-button compact">{editingAnnotationId ? "Update annotation" : "Save annotation"} <span aria-hidden="true">↗</span></button>
                 {annotationError && <p className="annotation-error" role="alert">{annotationError}</p>}
               </form>
             )}
@@ -301,14 +474,16 @@ export default function Home() {
             ) : (
               <p className="empty-features map-empty">No annotations yet. Add the first one above.</p>
             )}
-            <p className="session-note">Added annotations stay in this browser session and do not change the original SnapGene file.</p>
+            <p className="session-note">Edits are non-destructive. Export a DOTDNA project or GenBank file when you want to keep them.</p>
           </section>
-
-          <DocumentInspector data={data} />
 
           <AnalysisPanels key={fileName} sequence={data.sequence} circular={data.circular} />
 
-          <div className="result-layout">
+          <MolecularTools fileName={fileName} sequence={data.sequence} circular={data.circular} primers={data.primers} onPrimersChange={changePrimers} />
+
+          <SequenceEditor sequence={data.sequence} circular={data.circular} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} />
+
+          <div className="result-layout" id="sequence">
             <div className="sequence-panel">
               <div className="panel-toolbar">
                 <div>
@@ -341,7 +516,7 @@ export default function Home() {
                     <li key={feature.id}>
                       <span className="feature-swatch" style={{ backgroundColor: feature.color ?? "#17b6c9" }} />
                       <div><strong>{feature.name}</strong><small>{feature.range ?? feature.type.replaceAll("_", " ")} · {feature.isCustom ? "added" : "file"}</small></div>
-                      {feature.isCustom && <button className="remove-annotation" type="button" onClick={() => setCustomAnnotations((current) => current.filter((item) => item.id !== feature.id))} aria-label={`Remove ${feature.name}`}>×</button>}
+                      <div className="feature-actions"><button type="button" onClick={() => editAnnotation(feature)} aria-label={`Edit ${feature.name}`}>Edit</button><button className="remove-annotation" type="button" onClick={() => removeAnnotation(feature)} aria-label={`Remove ${feature.name}`}>×</button></div>
                     </li>
                   ))}
                 </ol>
@@ -350,25 +525,27 @@ export default function Home() {
               )}
             </aside>
           </div>
+
+          <DocumentInspector data={data} />
         </section>
       ) : (
         <section className="how-it-works">
           <div className="how-title">
             <p className="eyebrow cyan">What comes out</p>
-            <h2>From binary file<br />to readable biology.</h2>
+            <h2>From sequence file<br />to working construct.</h2>
           </div>
           <div className="steps">
-            <article><span>01</span><h3>Decode</h3><p>Indexes every native SnapGene packet and reads the structured sequence data.</p></article>
-            <article><span>02</span><h3>Inspect</h3><p>Maps annotations, ORFs, metadata, enzymes, and simulated digest fragments.</p></article>
-            <article><span>03</span><h3>Take it</h3><p>Copy every base or download a ready-to-use FASTA file.</p></article>
+            <article><span>01</span><h3>Open</h3><p>Reads SnapGene, GenBank, FASTA, raw DNA, and portable DOTDNA projects.</p></article>
+            <article><span>02</span><h3>Work</h3><p>Map, edit, annotate, design primers, run PCR and digest simulations, and translate.</p></article>
+            <article><span>03</span><h3>Export</h3><p>Take FASTA, annotated GenBank, protein, amplicon, map PNG, or a complete project.</p></article>
           </div>
         </section>
       )}
 
       <footer>
         <a className="brand footer-brand" href="#top">DOTDNA</a>
-        <p>Small tool. Clear sequence.</p>
-        <p className="footer-tech">SnapGene .dna → map + analysis + FASTA</p>
+        <p>Private sequence work, in your browser.</p>
+        <p className="footer-tech">.dna · GenBank · FASTA · DOTDNA</p>
       </footer>
     </main>
   );

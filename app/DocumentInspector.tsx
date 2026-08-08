@@ -19,13 +19,13 @@ export function DocumentInspector({ data }: Props) {
   const decodedPackets = data.packets.filter(({ decoded }) => decoded).length;
 
   return (
-    <section className="document-inspector" aria-labelledby="document-heading">
+    <section className="document-inspector" id="file-details" aria-labelledby="document-heading">
       <div className="document-heading">
         <div>
           <span className="panel-kicker">FILE CONTENTS</span>
           <h3 id="document-heading">Inside the SnapGene document</h3>
         </div>
-        <span className="packet-summary">{decodedPackets}/{data.packetCount} packet types interpreted</span>
+        <span className="packet-summary">{data.packetCount ? `${decodedPackets}/${data.packetCount} packet types interpreted` : "Interoperable text document"}</span>
       </div>
 
       <div className="document-grid">
@@ -71,7 +71,7 @@ export function DocumentInspector({ data }: Props) {
         </article>
       </div>
 
-      <details className="packet-manifest">
+      {data.packetCount > 0 && <details className="packet-manifest">
         <summary><span>Packet manifest</span><small>See every section found in this file</small></summary>
         <div className="packet-table-wrap">
           <table className="packet-table">
@@ -91,7 +91,7 @@ export function DocumentInspector({ data }: Props) {
           </table>
         </div>
         <p className="packet-note">Structured sequence, feature, primer, note, end-chemistry, enzyme-set, alignment, and visibility packets are decoded. Proprietary binary display/history packets are safely indexed and skipped.</p>
-      </details>
+      </details>}
     </section>
   );
 }

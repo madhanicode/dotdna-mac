@@ -430,6 +430,61 @@ export function parseSnapGene(buffer: ArrayBuffer): SnapGeneData {
   };
 }
 
+export function normalizeDnaSequence(value: string) {
+  return value.replace(/\s/g, "").replace(/\d/g, "").toUpperCase().replace(/U/g, "T");
+}
+
+export function calculateSequenceStats(sequence: string) {
+  const normalized = normalizeDnaSequence(sequence);
+  if (!normalized || !allowedBases.test(normalized)) {
+    throw new Error("Use DNA bases and supported IUPAC ambiguity symbols only.");
+  }
+  const canonicalBases = normalized.match(/[ACGT]/g)?.length ?? 0;
+  const gcBases = normalized.match(/[GC]/g)?.length ?? 0;
+  return {
+    sequence: normalized,
+    length: normalized.length,
+    gcPercent: canonicalBases ? (gcBases / canonicalBases) * 100 : 0,
+    unknownBases: normalized.length - canonicalBases,
+  };
+}
+
+export function createSequenceData(
+  sequence: string,
+  options: Partial<Pick<SnapGeneData, "circular" | "doubleStranded" | "features" | "primers" | "notes">> = {},
+): SnapGeneData {
+  return {
+    ...calculateSequenceStats(sequence),
+    circular: options.circular ?? false,
+    doubleStranded: options.doubleStranded ?? true,
+    features: options.features ?? [],
+    primers: options.primers ?? [],
+    primerSettings: {},
+    notes: options.notes ?? emptyNotes(),
+    sequenceProperties: emptySequenceProperties(),
+    enzymeVisibilities: [],
+    customEnzymeSetCount: 0,
+    alignableSequenceCount: 0,
+    header: { sequenceType: 1, exportVersion: null, importVersion: null },
+    packets: [],
+    packetCount: 0,
+  };
+}
+
+export function updateSequenceData(
+  data: SnapGeneData,
+  sequence: string,
+  options: Partial<Pick<SnapGeneData, "circular" | "features" | "primers">> = {},
+): SnapGeneData {
+  return {
+    ...data,
+    ...calculateSequenceStats(sequence),
+    circular: options.circular ?? data.circular,
+    features: options.features ?? data.features,
+    primers: options.primers ?? data.primers,
+  };
+}
+
 export function toFasta(name: string, sequence: string) {
   const safeName = name.replace(/\.dna$/i, "").replace(/[^a-z0-9_.-]+/gi, "_");
   const lines = sequence.match(/.{1,80}/g) ?? [];

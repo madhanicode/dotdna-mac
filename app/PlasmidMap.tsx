@@ -59,6 +59,18 @@ export function PlasmidMap({ fileName, sequence, circular, features }: Props) {
   }), [enzymeRows, enzymeDisplay]);
   const activeFeature = features[selectedFeature] ?? null;
 
+  function downloadMap() {
+    canvasRef.current?.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${fileName.replace(/\.[^.]+$/, "")}_plasmid-map.png`;
+      link.click();
+      URL.revokeObjectURL(url);
+    }, "image/png");
+  }
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -167,7 +179,7 @@ export function PlasmidMap({ fileName, sequence, circular, features }: Props) {
   }, [activeFeature, circular, features, fileName, selectedFeature, sequence.length, visibleEnzymes]);
 
   return (
-    <section className="plasmid-section" aria-labelledby="plasmid-heading">
+    <section className="plasmid-section" id="map" aria-labelledby="plasmid-heading">
       <div className="plasmid-heading">
         <div>
           <span className="panel-kicker">INTERACTIVE MAP</span>
@@ -178,6 +190,7 @@ export function PlasmidMap({ fileName, sequence, circular, features }: Props) {
           <button type="button" className={enzymeDisplay === "unique" ? "active" : ""} onClick={() => setEnzymeDisplay("unique")}>Unique</button>
           <button type="button" className={enzymeDisplay === "double" ? "active" : ""} onClick={() => setEnzymeDisplay("double")}>1–2 cutters</button>
           <button type="button" className={enzymeDisplay === "none" ? "active" : ""} onClick={() => setEnzymeDisplay("none")}>Off</button>
+          <button type="button" className="map-download" onClick={downloadMap}>PNG ↓</button>
         </div>
       </div>
 
