@@ -1,7 +1,16 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import { analyzePrimer, findPrimerBindings, simulatePcr, translateReadingFrame } from "./molecular-biology";
+import {
+  analyzePrimer,
+  designPrimerPair,
+  findPrimerBindings,
+  PrimerDesignCandidate,
+  PrimerDesignPurpose,
+  PrimerDesignResult,
+  simulatePcr,
+  translateReadingFrame,
+} from "./molecular-biology";
 import { SnapGenePrimer, toFasta } from "./snapgene";
 
 type Props = {
@@ -12,7 +21,7 @@ type Props = {
   onPrimersChange: (primers: SnapGenePrimer[], description: string) => void;
 };
 
-type ToolTab = "primers" | "pcr" | "translation";
+type ToolTab = "primers" | "design" | "pcr" | "translation";
 type ReadingFrame = 1 | 2 | 3 | -1 | -2 | -3;
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -38,6 +47,12 @@ export function MolecularTools({ fileName, sequence, circular, primers, onPrimer
   const [primerError, setPrimerError] = useState("");
   const [forwardPrimer, setForwardPrimer] = useState("0");
   const [reversePrimer, setReversePrimer] = useState("1");
+  const [designPurpose, setDesignPurpose] = useState<PrimerDesignPurpose>("pcr");
+  const [designStart, setDesignStart] = useState("1");
+  const [designEnd, setDesignEnd] = useState(String(Math.min(sequence.length, 1000)));
+  const [designTm, setDesignTm] = useState("60");
+  const [designResult, setDesignResult] = useState<PrimerDesignResult | null>(null);
+  const [designError, setDesignError] = useState("");
   const [frame, setFrame] = useState<ReadingFrame>(1);
   const protein = useMemo(() => translateReadingFrame(sequence, frame), [sequence, frame]);
   const pcrProduct = useMemo(() => {
@@ -86,6 +101,48 @@ export function MolecularTools({ fileName, sequence, circular, primers, onPrimer
     setReversePrimer("0");
   }
 
+  function runPrimerDesign(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDesignError("");
+    try {
+      setDesignResult(designPrimerPair(sequence, Number(designStart), Number(designEnd), {
+        purpose: designPurpose,
+        desiredTm: Number(designTm),
+        circular,
+      }));
+    } catch (caught) {
+      setDesignResult(null);
+      setDesignError(caught instanceof Error ? caught.message : "A primer pair could not be designed.");
+    }
+  }
+
+  function designedPrimer(candidate: PrimerDesignCandidate, suffix: string): SnapGenePrimer {
+    const bindings = findPrimerBindings(sequence, candidate.sequence, circular);
+    return {
+      name: `${fileName.replace(/\.[^.]+$/, "")} ${suffix}`,
+      sequence: candidate.sequence,
+      description: `DOTDNA heuristic design · target ${designStart}-${designEnd}`,
+      color: candidate.strand === "+" ? "#ff725e" : "#17b6c9",
+      phosphorylated: false,
+      bindingSites: bindings.map((binding) => ({
+        range: `${binding.start}-${binding.end}`,
+        start: binding.start,
+        end: binding.end,
+        boundStrand: binding.strand,
+      })),
+    };
+  }
+
+  function saveDesignedPair() {
+    if (!designResult) return;
+    const label = designResult.purpose === "pcr" ? "PCR" : "Seq";
+    onPrimersChange([
+      ...primers,
+      designedPrimer(designResult.forward, `${label} F`),
+      designedPrimer(designResult.reverse, `${label} R`),
+    ], `Added designed ${designResult.purpose === "pcr" ? "PCR" : "sequencing"} primer pair`);
+  }
+
   return (
     <section className="molecular-tools" id="primers" aria-labelledby="molecular-heading">
       <div className="workspace-section-heading">
@@ -95,6 +152,7 @@ export function MolecularTools({ fileName, sequence, circular, primers, onPrimer
         </div>
         <div className="tool-tabs" role="tablist" aria-label="Molecular biology tools">
           <button type="button" role="tab" aria-selected={tab === "primers"} className={tab === "primers" ? "active" : ""} onClick={() => setTab("primers")}>Primers</button>
+          <button type="button" role="tab" aria-selected={tab === "design"} className={tab === "design" ? "active" : ""} onClick={() => setTab("design")}>Design</button>
           <button type="button" role="tab" aria-selected={tab === "pcr"} className={tab === "pcr" ? "active" : ""} onClick={() => setTab("pcr")}>PCR</button>
           <button type="button" role="tab" aria-selected={tab === "translation"} className={tab === "translation" ? "active" : ""} onClick={() => setTab("translation")}>Translation</button>
         </div>
@@ -143,6 +201,43 @@ export function MolecularTools({ fileName, sequence, circular, primers, onPrimer
                 </table>
               </div>
             ) : <div className="tool-empty"><span>5′</span><p>Add primers to calculate Tm, GC content, exact template binding sites, and PCR products.</p></div>}
+          </div>
+        </div>
+      )}
+
+      {tab === "design" && (
+        <div className="primer-design-workspace" role="tabpanel">
+          <form className="primer-design-form" onSubmit={runPrimerDesign}>
+            <span className="tool-panel-label">AUTOMATIC PRIMER DESIGN</span>
+            <label><span>Purpose</span><select value={designPurpose} onChange={(event) => { setDesignPurpose(event.target.value as PrimerDesignPurpose); setDesignResult(null); }}><option value="pcr">PCR amplification</option><option value="sequencing">Sequence a target</option></select></label>
+            <div className="design-coordinate-row">
+              <label><span>Target start</span><input type="number" min="1" max={sequence.length} value={designStart} onChange={(event) => setDesignStart(event.target.value)} /></label>
+              <label><span>Target end</span><input type="number" min="1" max={sequence.length} value={designEnd} onChange={(event) => setDesignEnd(event.target.value)} /></label>
+            </div>
+            <label><span>Desired Tm</span><div className="unit-input dark-unit"><input type="number" min="45" max="75" step="0.5" value={designTm} onChange={(event) => setDesignTm(event.target.value)} /><b>°C</b></div></label>
+            <p>{designPurpose === "pcr" ? "Finds an inward-facing pair around the chosen interval." : "Places inward-facing primers outside the target, so both ends need flanking sequence."}</p>
+            {designError && <p className="tool-error" role="alert">{designError}</p>}
+            <button className="primary-button compact" type="submit">Design pair <span aria-hidden="true">↗</span></button>
+          </form>
+
+          <div className="primer-design-result">
+            {designResult ? (
+              <>
+                <div className="design-result-heading"><div><span className="tool-panel-label">RECOMMENDED PAIR</span><h4>{designResult.purpose === "pcr" ? "PCR primers" : "Sequencing primers"}</h4></div><button type="button" className="primary-button compact" onClick={saveDesignedPair}>Add both to library</button></div>
+                <div className="designed-primer-grid">
+                  {[designResult.forward, designResult.reverse].map((candidate) => (
+                    <article key={candidate.strand}>
+                      <span className={`strand-pill ${candidate.strand === "+" ? "forward" : "reverse"}`}>{candidate.strand === "+" ? "Forward" : "Reverse"}</span>
+                      <code>{candidate.sequence}</code>
+                      <dl><div><dt>Template site</dt><dd>{candidate.start}–{candidate.end} ({candidate.strand})</dd></div><div><dt>Length</dt><dd>{candidate.length} nt</dd></div><div><dt>Tm</dt><dd>{candidate.meltingTemperature.toFixed(1)}°C</dd></div><div><dt>GC</dt><dd>{candidate.gcPercent.toFixed(1)}%</dd></div><div><dt>Exact bindings</dt><dd>{candidate.bindingCount}</dd></div></dl>
+                      {candidate.warnings.length ? <ul>{candidate.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <p className="design-pass">Passes heuristic screens</p>}
+                    </article>
+                  ))}
+                </div>
+                <div className="design-pair-summary"><span><strong>{designResult.meltingTemperatureDifference.toFixed(1)}°C</strong> Tm difference</span><span><strong>{designResult.predictedAmpliconLength ? `${numberFormatter.format(designResult.predictedAmpliconLength)} bp` : "—"}</strong> predicted amplicon</span></div>
+                <p className="method-note">Screening-grade heuristic: exact template binding, simple Tm estimate, GC range, homopolymers, and 3′ base. Confirm reaction conditions before ordering.</p>
+              </>
+            ) : <div className="tool-empty"><span>3′</span><p>Choose a target and DOTDNA will score 18–25 nt primers near its boundaries. Designs stay local until you add them to the primer library.</p></div>}
           </div>
         </div>
       )}

@@ -14,6 +14,7 @@ import {
 type Props = {
   sequence: string;
   circular: boolean;
+  onCreateCds?: (orf: OpenReadingFrame) => void;
 };
 
 type CutterMode = "all" | "unique" | "double" | "type-iis";
@@ -43,7 +44,7 @@ function gelPosition(fragmentLength: number, maximumLength: number) {
   return 10 + ratio * 80;
 }
 
-export function AnalysisPanels({ sequence, circular }: Props) {
+export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
   const [minimumAminoAcids, setMinimumAminoAcids] = useState(50);
   const [startMode, setStartMode] = useState<OrfStartMode>("atg");
   const [enzymeQuery, setEnzymeQuery] = useState("");
@@ -158,7 +159,7 @@ export function AnalysisPanels({ sequence, circular }: Props) {
 
           <div className="analysis-table-wrap">
             <table className="analysis-table">
-              <thead><tr><th>Frame</th><th>Range</th><th>Length</th><th>Protein preview</th></tr></thead>
+              <thead><tr><th>Frame</th><th>Range</th><th>Length</th><th>Protein preview</th>{onCreateCds && <th>Annotation</th>}</tr></thead>
               <tbody>
                 {longestOrfs.map((orf) => (
                   <tr key={orf.id}>
@@ -166,6 +167,7 @@ export function AnalysisPanels({ sequence, circular }: Props) {
                     <td>{rangeLabel(orf)}</td>
                     <td>{numberFormatter.format(orf.aminoAcidLength)} aa</td>
                     <td className="protein-preview">{orf.protein.slice(0, 18)}{orf.protein.length > 18 ? "…" : ""}</td>
+                    {onCreateCds && <td><button type="button" className="orf-annotation-button" onClick={() => onCreateCds(orf)}>Create CDS</button></td>}
                   </tr>
                 ))}
               </tbody>

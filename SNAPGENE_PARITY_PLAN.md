@@ -1,6 +1,6 @@
 # DOTDNA → full molecular-biology workspace
 
-Updated: 2026-08-07
+Updated: 2026-08-08
 
 This roadmap inventories SnapGene’s publicly documented capability surface and turns it into an independent implementation plan for DOTDNA. “Parity” means users can complete the same scientific workflows with comparable correctness and interoperability; it does not mean copying SnapGene’s interface, code, proprietary datasets, or branding.
 
@@ -20,11 +20,12 @@ This roadmap inventories SnapGene’s publicly documented capability surface and
 | SnapGene reading | Validates and indexes every packet; decodes sequence, topology, multisegment/directional features, qualifiers, primers, notes, end chemistry, enzyme visibility, and format metadata | Decode proprietary binary display, enzyme-data, alignment, and history payloads against a representative corpus |
 | Sequence view | Full sequence, coordinates, motif search, copy, FASTA/GenBank/project export, insert/delete/replace, reverse complement, topology changes, undo/redo | Inline overlays, synchronized selection, zoom, direct base editing, translations, primers, and cut markers |
 | Features | Displays linear and interactive circular maps; reads multi-segment features, directionality, qualifiers; adds/edits/removes annotations and remaps them across sequence edits | CDS translation, introns, point-feature UI, rich qualifier editing, persistent project library |
-| ORFs | Six-frame prediction, forward/reverse colors, minimum length and start-codon controls | Alternate genetic codes, no-start/incomplete ORFs, circular edge-case validation, convert ORF to CDS |
+| ORFs | Six-frame prediction, forward/reverse colors, minimum length and start-codon controls, and one-click predicted ORF→CDS annotations with translation qualifiers | Alternate genetic codes, no-start/incomplete ORFs, circular edge-case validation, and intron-aware translation |
 | Restriction sites | Searchable Type II/Type IIS catalog, cutter filters, circular-origin matching, cut geometry, multi-enzyme fragment calculation, and virtual gel lane | Full curated enzyme database, methylation sensitivity, enzyme sets, partial digests, and configurable gel conditions |
-| Primers and PCR | Primer library, GC/Tm/MW calculations, exact forward/reverse binding, inward-facing PCR products, amplicon FASTA export | Mismatches/tails, secondary structure, richer thermodynamics, automatic design, inverse/overlap PCR, mutagenesis |
-| Translation | Whole-sequence six-frame translation and protein FASTA export | Genetic codes, translated feature editing, introns/frameshifts, protein properties, ORF-to-CDS |
+| Primers and PCR | Primer library, GC/Tm/MW calculations, exact forward/reverse binding, inward-facing PCR products, amplicon FASTA export, and heuristic PCR/sequencing primer-pair design | Mismatches/tails, secondary structure, richer thermodynamics, inverse/overlap PCR, mutagenesis |
+| Translation | Whole-sequence six-frame translation, protein FASTA export, and predicted ORF→CDS conversion | Genetic codes, translated feature editing, introns/frameshifts, and protein properties |
 | Interoperability | Opens SnapGene, GenBank, FASTA, plain DNA, and portable DOTDNA projects; exports FASTA, annotated GenBank, project JSON, map PNG, protein, and amplicon | EMBL/GFF/BED, additional vendor formats, SnapGene round-trip writing, batch conversion |
+| Assembly and verification | Ordered multi-fragment exact-overlap assembly with automatic reverse-complement orientation, circular closure, product export/opening, and deterministic global DNA alignment | Thermodynamic overlap design, feature propagation, local/semi-global alignment, trace/quality handling, and multiple alignment |
 
 ## Complete capability inventory
 
@@ -187,16 +188,18 @@ Estimates are rough single-team engineering ranges and should be refined after t
 - Validate calculations with published standards and independently generated fixtures.
 - Deliverable: routine primer and amplification design workflows.
 
-### Phase 5 — cloning and assembly (8–12 weeks)
+### Phase 5 — cloning and assembly (started; 8–12 weeks total)
 
 - Restriction/ligation, Gibson, NEBuilder, In-Fusion, Golden Gate, Gateway, TA/GC, and TOPO workflows.
+- Exact suffix-to-prefix multi-fragment assembly, automatic downstream-fragment orientation, circular closure, and product creation are now available as the deterministic foundation for Gibson/HiFi-style planning.
 - Fragment-end chemistry, compatibility engine, feature propagation, reaction schematics, warnings, and history records.
 - Deliverable: major in-silico cloning workflows with reproducible products.
 
-### Phase 6 — gels, alignments, and sequencing verification (8–12 weeks)
+### Phase 6 — gels, alignments, and sequencing verification (started; 8–12 weeks total)
 
 - Agarose gel/digest simulation and configurable markers.
 - Pairwise/multiple alignment engines, Sanger trace-to-reference, coverage/mismatch UI, consensus, and CAP3-compatible contig assembly.
+- Needleman–Wunsch global DNA alignment with identity, mismatch, gap, score, and downloadable block output is now available for focused regions.
 - BLAST handoff and results import.
 - Deliverable: construct verification and gel-planning workflows.
 
@@ -223,8 +226,8 @@ Estimates are rough single-team engineering ranges and should be refined after t
 
 ## Immediate next sprint after the workspace expansion
 
-1. Add synchronized selection, zoom, and inline overlays across circular, linear, and sequence views.
-2. Upgrade primer thermodynamics and add automatic sequencing/PCR primer design, mismatches, tails, inverse PCR, and overlap PCR.
-3. Convert predicted ORFs into editable CDS annotations and add translated-feature/intron support.
-4. Add cloning/assembly product engines beginning with restriction cloning, Gibson/HiFi, and Golden Gate.
-5. Decode history/alignment/display binary packets and introduce saved local project collections with explicit privacy controls.
+1. Add restriction cloning and Golden Gate planning with end-compatibility checks, orientation warnings, and feature propagation.
+2. Upgrade primer thermodynamics and add mismatches, tails, inverse PCR, overlap PCR, and mutagenesis workflows.
+3. Add translated-feature editing, intron-aware CDS display, alternate genetic codes, and protein properties.
+4. Extend verification to local/semi-global alignment, reverse-complement query selection, coverage tracks, and Sanger trace import.
+5. Add synchronized selection/zoom/inline overlays, then decode history/alignment/display binary packets and introduce saved local project collections.

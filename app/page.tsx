@@ -2,13 +2,16 @@
 
 import { ChangeEvent, DragEvent, FormEvent, useMemo, useRef, useState } from "react";
 import { AnalysisPanels } from "./AnalysisPanels";
+import { DesignVerifyTools } from "./DesignVerifyTools";
 import { DocumentInspector } from "./DocumentInspector";
 import { MolecularTools } from "./MolecularTools";
 import { PlasmidMap } from "./PlasmidMap";
 import { SequenceEditor } from "./SequenceEditor";
+import type { AssemblyResult } from "./design-tools";
 import { applySequenceEdit, SequenceEdit } from "./sequence-edit";
 import { parseTextSequence, toDotDnaProject, toGenBank } from "./sequence-formats";
-import { parseSnapGene, SnapGeneData, SnapGeneFeature, SnapGenePrimer, toFasta, updateSequenceData } from "./snapgene";
+import type { OpenReadingFrame } from "./sequence-analysis";
+import { createSequenceData, parseSnapGene, SnapGeneData, SnapGeneFeature, SnapGenePrimer, toFasta, updateSequenceData } from "./snapgene";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 
@@ -167,6 +170,40 @@ export default function Home() {
   function changePrimers(primers: SnapGenePrimer[], description: string) {
     if (!data) return;
     commitWorkspace(updateSequenceData(data, data.sequence, { primers }), customAnnotations, description);
+  }
+
+  function createCdsFromOrf(orf: OpenReadingFrame) {
+    if (!data) return;
+    const color = orf.strand === "+" ? "#ff8a4c" : "#58c882";
+    const ranges = orf.wrapsOrigin
+      ? [`${orf.start}-${data.length}`, `1-${orf.end}`]
+      : [`${orf.start}-${orf.end}`];
+    const annotation: DisplayAnnotation = {
+      id: `orf-${orf.id}-${Date.now()}`,
+      isCustom: true,
+      name: `Predicted CDS ${orf.frame > 0 ? "+" : ""}${orf.frame}`,
+      type: "CDS",
+      range: ranges.join(", "),
+      color,
+      directionality: orf.strand === "+" ? 1 : 2,
+      strand: orf.strand,
+      segments: ranges.map((range) => {
+        const position = coordinates(range);
+        return { range, start: position?.start ?? null, end: position?.end ?? null, color, name: null, type: "standard" };
+      }),
+      qualifiers: [
+        { name: "translation", value: orf.protein },
+        { name: "note", value: `Predicted locally by DOTDNA in reading frame ${orf.frame > 0 ? "+" : ""}${orf.frame}` },
+      ],
+      readingFrame: Math.abs(orf.frame) - 1,
+    };
+    commitWorkspace(data, [...customAnnotations, annotation], `Created CDS annotation from ORF frame ${orf.frame > 0 ? "+" : ""}${orf.frame}`);
+  }
+
+  function openAssemblyProduct(result: AssemblyResult, name: string) {
+    const safeName = `${name.trim() || "assembly"}.dna`;
+    loadWorkspace(createSequenceData(result.sequence, { circular: result.circular }), safeName, "DOTDNA Assembly");
+    window.setTimeout(() => document.querySelector("#map")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   }
 
   async function readFile(file?: File) {
@@ -339,7 +376,8 @@ export default function Home() {
           <h1>Your DNA sequence,<br /><em>out in the open.</em></h1>
           <p className="lede">
             Open SnapGene, GenBank, FASTA, DOTDNA projects, or paste raw DNA. Map, edit,
-            annotate, design primers, simulate PCR and digests, translate, and export—all locally.
+            annotate, design primers, assemble fragments, verify alignments, simulate PCR and digests,
+            translate, and export—all locally.
           </p>
           <div className="hero-proof" aria-label="Product benefits">
             <span>No account</span>
@@ -397,6 +435,7 @@ export default function Home() {
             <a href="#annotations">Annotations</a>
             <a href="#analysis">ORFs &amp; enzymes</a>
             <a href="#primers">Primers &amp; PCR</a>
+            <a href="#design">Assemble &amp; align</a>
             <a href="#editor">Edit</a>
             <a href="#sequence">Sequence</a>
             <a href="#file-details">File details</a>
@@ -477,9 +516,11 @@ export default function Home() {
             <p className="session-note">Edits are non-destructive. Export a DOTDNA project or GenBank file when you want to keep them.</p>
           </section>
 
-          <AnalysisPanels key={fileName} sequence={data.sequence} circular={data.circular} />
+          <AnalysisPanels key={fileName} sequence={data.sequence} circular={data.circular} onCreateCds={createCdsFromOrf} />
 
-          <MolecularTools fileName={fileName} sequence={data.sequence} circular={data.circular} primers={data.primers} onPrimersChange={changePrimers} />
+          <MolecularTools key={`${fileName}-molecular`} fileName={fileName} sequence={data.sequence} circular={data.circular} primers={data.primers} onPrimersChange={changePrimers} />
+
+          <DesignVerifyTools key={`${fileName}-design`} fileName={fileName} sequence={data.sequence} onOpenProduct={openAssemblyProduct} />
 
           <SequenceEditor sequence={data.sequence} circular={data.circular} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} />
 
@@ -536,7 +577,7 @@ export default function Home() {
           </div>
           <div className="steps">
             <article><span>01</span><h3>Open</h3><p>Reads SnapGene, GenBank, FASTA, raw DNA, and portable DOTDNA projects.</p></article>
-            <article><span>02</span><h3>Work</h3><p>Map, edit, annotate, design primers, run PCR and digest simulations, and translate.</p></article>
+            <article><span>02</span><h3>Work</h3><p>Map, edit, annotate, design primers, assemble, align, digest, and translate.</p></article>
             <article><span>03</span><h3>Export</h3><p>Take FASTA, annotated GenBank, protein, amplicon, map PNG, or a complete project.</p></article>
           </div>
         </section>

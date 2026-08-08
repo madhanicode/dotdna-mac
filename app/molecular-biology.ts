@@ -27,6 +27,28 @@ export type PcrProduct = {
   reverseBinding: PrimerBinding;
 };
 
+export type PrimerDesignPurpose = "pcr" | "sequencing";
+
+export type PrimerDesignCandidate = PrimerAnalysis & {
+  name: string;
+  start: number;
+  end: number;
+  strand: "+" | "-";
+  bindingCount: number;
+  score: number;
+  warnings: string[];
+};
+
+export type PrimerDesignResult = {
+  purpose: PrimerDesignPurpose;
+  targetStart: number;
+  targetEnd: number;
+  forward: PrimerDesignCandidate;
+  reverse: PrimerDesignCandidate;
+  meltingTemperatureDifference: number;
+  predictedAmpliconLength: number | null;
+};
+
 function exactPositions(template: string, query: string, circular: boolean) {
   const extension = circular ? template.slice(0, Math.max(0, query.length - 1)) : "";
   const searchable = template + extension;
@@ -68,14 +90,12 @@ export function findPrimerBindings(templateValue: string, primerValue: string, c
     strand: "+" as const,
     wrapsOrigin: position + primer.length > template.length,
   }));
-  if (reverse !== primer) {
-    bindings.push(...exactPositions(template, reverse, circular).map((position) => ({
-      start: position + 1,
-      end: ((position + primer.length - 1) % template.length) + 1,
-      strand: "-" as const,
-      wrapsOrigin: position + primer.length > template.length,
-    })));
-  }
+  bindings.push(...exactPositions(template, reverse, circular).map((position) => ({
+    start: position + 1,
+    end: ((position + primer.length - 1) % template.length) + 1,
+    strand: "-" as const,
+    wrapsOrigin: position + primer.length > template.length,
+  })));
   return bindings.sort((a, b) => a.start - b.start || a.strand.localeCompare(b.strand));
 }
 
@@ -115,6 +135,136 @@ export function simulatePcr(templateValue: string, forwardPrimer: string, revers
   }
 
   return products.sort((a, b) => a.length - b.length || a.start - b.start)[0] ?? null;
+}
+
+function candidateWarnings(analysis: PrimerAnalysis, bindingCount: number) {
+  const warnings: string[] = [];
+  if (bindingCount !== 1) warnings.push(bindingCount ? `${bindingCount} exact template bindings` : "No exact template binding");
+  if (analysis.gcPercent < 35 || analysis.gcPercent > 65) warnings.push("GC outside 35–65%");
+  if (analysis.meltingTemperature < 55 || analysis.meltingTemperature > 65) warnings.push("Tm outside 55–65°C");
+  if (/(A{5}|C{5}|G{5}|T{5})/.test(analysis.sequence)) warnings.push("Homopolymer run ≥5 bases");
+  if (!/[GC]$/.test(analysis.sequence)) warnings.push("Weak 3′ terminal base");
+  return warnings;
+}
+
+function scoreCandidate(analysis: PrimerAnalysis, bindingCount: number, desiredTm: number) {
+  const gcPenalty = analysis.gcPercent < 40
+    ? 40 - analysis.gcPercent
+    : analysis.gcPercent > 60 ? analysis.gcPercent - 60 : 0;
+  const uniquenessPenalty = bindingCount === 1 ? 0 : bindingCount === 0 ? 90 : 35 + bindingCount * 3;
+  const homopolymerPenalty = /(A{5}|C{5}|G{5}|T{5})/.test(analysis.sequence) ? 22 : 0;
+  const terminalPenalty = /[GC]$/.test(analysis.sequence) ? 0 : 2;
+  return Math.abs(analysis.meltingTemperature - desiredTm) * 2 + gcPenalty + uniquenessPenalty + homopolymerPenalty + terminalPenalty;
+}
+
+function makeDesignCandidate(
+  template: string,
+  startIndex: number,
+  length: number,
+  strand: "+" | "-",
+  desiredTm: number,
+  circular: boolean,
+  name: string,
+): PrimerDesignCandidate | null {
+  if (startIndex < 0 || startIndex + length > template.length) return null;
+  const bindingSequence = template.slice(startIndex, startIndex + length);
+  const sequence = strand === "+" ? bindingSequence : reverseComplement(bindingSequence);
+  try {
+    const analysis = analyzePrimer(sequence);
+    const bindingCount = findPrimerBindings(template, sequence, circular).length;
+    return {
+      ...analysis,
+      name,
+      start: startIndex + 1,
+      end: startIndex + length,
+      strand,
+      bindingCount,
+      score: scoreCandidate(analysis, bindingCount, desiredTm),
+      warnings: candidateWarnings(analysis, bindingCount),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function designPrimerPair(
+  templateValue: string,
+  targetStartValue: number,
+  targetEndValue: number,
+  options: {
+    purpose?: PrimerDesignPurpose;
+    desiredTm?: number;
+    minimumLength?: number;
+    maximumLength?: number;
+    searchWindow?: number;
+    circular?: boolean;
+  } = {},
+): PrimerDesignResult {
+  const template = normalizeDnaSequence(templateValue);
+  const targetStart = Math.floor(targetStartValue);
+  const targetEnd = Math.floor(targetEndValue);
+  if (!template) throw new Error("A template sequence is required.");
+  if (targetStart < 1 || targetEnd > template.length || targetEnd < targetStart) {
+    throw new Error(`Choose a target interval between 1 and ${template.length.toLocaleString()} bp.`);
+  }
+
+  const purpose = options.purpose ?? "pcr";
+  const desiredTm = Math.max(45, Math.min(75, options.desiredTm ?? 60));
+  const minimumLength = Math.max(12, Math.floor(options.minimumLength ?? 18));
+  const maximumLength = Math.max(minimumLength, Math.min(40, Math.floor(options.maximumLength ?? 25)));
+  const searchWindow = Math.max(0, Math.min(100, Math.floor(options.searchWindow ?? 12)));
+  const circular = Boolean(options.circular);
+  const forwardCandidates: PrimerDesignCandidate[] = [];
+  const reverseCandidates: PrimerDesignCandidate[] = [];
+
+  for (let length = minimumLength; length <= maximumLength; length += 1) {
+    if (purpose === "pcr") {
+      for (let offset = -searchWindow; offset <= searchWindow; offset += 1) {
+        const forward = makeDesignCandidate(template, targetStart - 1 + offset, length, "+", desiredTm, circular, "PCR forward");
+        const reverse = makeDesignCandidate(template, targetEnd - length + offset, length, "-", desiredTm, circular, "PCR reverse");
+        if (forward) forwardCandidates.push(forward);
+        if (reverse) reverseCandidates.push(reverse);
+      }
+    } else {
+      for (let gap = 0; gap <= searchWindow; gap += 1) {
+        const forward = makeDesignCandidate(template, targetStart - 1 - gap - length, length, "+", desiredTm, circular, "Sequencing forward");
+        const reverse = makeDesignCandidate(template, targetEnd + gap, length, "-", desiredTm, circular, "Sequencing reverse");
+        if (forward) forwardCandidates.push(forward);
+        if (reverse) reverseCandidates.push(reverse);
+      }
+    }
+  }
+
+  if (!forwardCandidates.length || !reverseCandidates.length) {
+    const context = purpose === "sequencing" ? "Sequencing primers need enough flanking sequence on both sides of the target." : "The target is too close to a template boundary.";
+    throw new Error(`${context} Adjust the target range or primer lengths.`);
+  }
+
+  const forwardPool = forwardCandidates.sort((a, b) => a.score - b.score || a.start - b.start).slice(0, 30);
+  const reversePool = reverseCandidates.sort((a, b) => a.score - b.score || b.end - a.end).slice(0, 30);
+  let best: { forward: PrimerDesignCandidate; reverse: PrimerDesignCandidate; score: number } | null = null;
+  for (const forward of forwardPool) {
+    for (const reverse of reversePool) {
+      const tmDifference = Math.abs(forward.meltingTemperature - reverse.meltingTemperature);
+      const geometryPenalty = purpose === "pcr" && forward.start >= reverse.end ? 1_000 : 0;
+      const score = forward.score + reverse.score + tmDifference * 3 + geometryPenalty;
+      if (!best || score < best.score) best = { forward, reverse, score };
+    }
+  }
+  if (!best) throw new Error("No primer pair could be designed for that interval.");
+
+  const product = purpose === "pcr"
+    ? simulatePcr(template, best.forward.sequence, best.reverse.sequence, circular)
+    : null;
+  return {
+    purpose,
+    targetStart,
+    targetEnd,
+    forward: best.forward,
+    reverse: best.reverse,
+    meltingTemperatureDifference: Math.abs(best.forward.meltingTemperature - best.reverse.meltingTemperature),
+    predictedAmpliconLength: product?.length ?? null,
+  };
 }
 
 export function translateReadingFrame(sequenceValue: string, frame: 1 | 2 | 3 | -1 | -2 | -3) {
