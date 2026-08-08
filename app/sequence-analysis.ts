@@ -16,6 +16,8 @@ export type RestrictionEnzyme = {
   name: string;
   recognition: string;
   kind: "Type II" | "Type IIS";
+  cutTop: number;
+  cutBottom: number;
 };
 
 export type RestrictionSite = {
@@ -25,6 +27,26 @@ export type RestrictionSite = {
   end: number;
   strand: "+" | "-";
   wrapsOrigin: boolean;
+};
+
+export type DigestCut = {
+  position: number;
+  enzymes: string[];
+};
+
+export type DigestFragment = {
+  id: string;
+  start: number;
+  end: number;
+  length: number;
+  wrapsOrigin: boolean;
+};
+
+export type RestrictionDigest = {
+  enzymeNames: string[];
+  cuts: DigestCut[];
+  fragments: DigestFragment[];
+  circular: boolean;
 };
 
 const complements: Record<string, string> = {
@@ -53,47 +75,47 @@ const codonTable: Record<string, string> = {
 const stopCodons = new Set(["TAA", "TAG", "TGA"]);
 
 export const RESTRICTION_ENZYMES: RestrictionEnzyme[] = [
-  { name: "AarI", recognition: "CACCTGC", kind: "Type IIS" },
-  { name: "AflII", recognition: "CTTAAG", kind: "Type II" },
-  { name: "AgeI", recognition: "ACCGGT", kind: "Type II" },
-  { name: "ApaI", recognition: "GGGCCC", kind: "Type II" },
-  { name: "AscI", recognition: "GGCGCGCC", kind: "Type II" },
-  { name: "AvrII", recognition: "CCTAGG", kind: "Type II" },
-  { name: "BamHI", recognition: "GGATCC", kind: "Type II" },
-  { name: "BbsI", recognition: "GAAGAC", kind: "Type IIS" },
-  { name: "BfuAI", recognition: "ACCTGC", kind: "Type IIS" },
-  { name: "BglII", recognition: "AGATCT", kind: "Type II" },
-  { name: "BsaI", recognition: "GGTCTC", kind: "Type IIS" },
-  { name: "BsiWI", recognition: "CGTACG", kind: "Type II" },
-  { name: "BsmBI", recognition: "CGTCTC", kind: "Type IIS" },
-  { name: "ClaI", recognition: "ATCGAT", kind: "Type II" },
-  { name: "DraI", recognition: "TTTAAA", kind: "Type II" },
-  { name: "EcoRI", recognition: "GAATTC", kind: "Type II" },
-  { name: "EcoRV", recognition: "GATATC", kind: "Type II" },
-  { name: "FspI", recognition: "TGCGCA", kind: "Type II" },
-  { name: "HaeIII", recognition: "GGCC", kind: "Type II" },
-  { name: "HindIII", recognition: "AAGCTT", kind: "Type II" },
-  { name: "HpaI", recognition: "GTTAAC", kind: "Type II" },
-  { name: "KpnI", recognition: "GGTACC", kind: "Type II" },
-  { name: "MfeI", recognition: "CAATTG", kind: "Type II" },
-  { name: "MluI", recognition: "ACGCGT", kind: "Type II" },
-  { name: "NcoI", recognition: "CCATGG", kind: "Type II" },
-  { name: "NdeI", recognition: "CATATG", kind: "Type II" },
-  { name: "NheI", recognition: "GCTAGC", kind: "Type II" },
-  { name: "NotI", recognition: "GCGGCCGC", kind: "Type II" },
-  { name: "PacI", recognition: "TTAATTAA", kind: "Type II" },
-  { name: "PstI", recognition: "CTGCAG", kind: "Type II" },
-  { name: "PvuII", recognition: "CAGCTG", kind: "Type II" },
-  { name: "SacI", recognition: "GAGCTC", kind: "Type II" },
-  { name: "SalI", recognition: "GTCGAC", kind: "Type II" },
-  { name: "SapI", recognition: "GCTCTTC", kind: "Type IIS" },
-  { name: "SbfI", recognition: "CCTGCAGG", kind: "Type II" },
-  { name: "SmaI", recognition: "CCCGGG", kind: "Type II" },
-  { name: "SpeI", recognition: "ACTAGT", kind: "Type II" },
-  { name: "SphI", recognition: "GCATGC", kind: "Type II" },
-  { name: "SwaI", recognition: "ATTTAAAT", kind: "Type II" },
-  { name: "XbaI", recognition: "TCTAGA", kind: "Type II" },
-  { name: "XhoI", recognition: "CTCGAG", kind: "Type II" },
+  { name: "AarI", recognition: "CACCTGC", kind: "Type IIS", cutTop: 11, cutBottom: 15 },
+  { name: "AflII", recognition: "CTTAAG", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "AgeI", recognition: "ACCGGT", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "ApaI", recognition: "GGGCCC", kind: "Type II", cutTop: 5, cutBottom: 1 },
+  { name: "AscI", recognition: "GGCGCGCC", kind: "Type II", cutTop: 2, cutBottom: 6 },
+  { name: "AvrII", recognition: "CCTAGG", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "BamHI", recognition: "GGATCC", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "BbsI", recognition: "GAAGAC", kind: "Type IIS", cutTop: 8, cutBottom: 12 },
+  { name: "BfuAI", recognition: "ACCTGC", kind: "Type IIS", cutTop: 10, cutBottom: 14 },
+  { name: "BglII", recognition: "AGATCT", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "BsaI", recognition: "GGTCTC", kind: "Type IIS", cutTop: 7, cutBottom: 11 },
+  { name: "BsiWI", recognition: "CGTACG", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "BsmBI", recognition: "CGTCTC", kind: "Type IIS", cutTop: 7, cutBottom: 11 },
+  { name: "ClaI", recognition: "ATCGAT", kind: "Type II", cutTop: 2, cutBottom: 4 },
+  { name: "DraI", recognition: "TTTAAA", kind: "Type II", cutTop: 3, cutBottom: 3 },
+  { name: "EcoRI", recognition: "GAATTC", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "EcoRV", recognition: "GATATC", kind: "Type II", cutTop: 3, cutBottom: 3 },
+  { name: "FspI", recognition: "TGCGCA", kind: "Type II", cutTop: 3, cutBottom: 3 },
+  { name: "HaeIII", recognition: "GGCC", kind: "Type II", cutTop: 2, cutBottom: 2 },
+  { name: "HindIII", recognition: "AAGCTT", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "HpaI", recognition: "GTTAAC", kind: "Type II", cutTop: 3, cutBottom: 3 },
+  { name: "KpnI", recognition: "GGTACC", kind: "Type II", cutTop: 5, cutBottom: 1 },
+  { name: "MfeI", recognition: "CAATTG", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "MluI", recognition: "ACGCGT", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "NcoI", recognition: "CCATGG", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "NdeI", recognition: "CATATG", kind: "Type II", cutTop: 2, cutBottom: 4 },
+  { name: "NheI", recognition: "GCTAGC", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "NotI", recognition: "GCGGCCGC", kind: "Type II", cutTop: 2, cutBottom: 6 },
+  { name: "PacI", recognition: "TTAATTAA", kind: "Type II", cutTop: 5, cutBottom: 3 },
+  { name: "PstI", recognition: "CTGCAG", kind: "Type II", cutTop: 5, cutBottom: 1 },
+  { name: "PvuII", recognition: "CAGCTG", kind: "Type II", cutTop: 3, cutBottom: 3 },
+  { name: "SacI", recognition: "GAGCTC", kind: "Type II", cutTop: 5, cutBottom: 1 },
+  { name: "SalI", recognition: "GTCGAC", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "SapI", recognition: "GCTCTTC", kind: "Type IIS", cutTop: 8, cutBottom: 11 },
+  { name: "SbfI", recognition: "CCTGCAGG", kind: "Type II", cutTop: 6, cutBottom: 2 },
+  { name: "SmaI", recognition: "CCCGGG", kind: "Type II", cutTop: 3, cutBottom: 3 },
+  { name: "SpeI", recognition: "ACTAGT", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "SphI", recognition: "GCATGC", kind: "Type II", cutTop: 5, cutBottom: 1 },
+  { name: "SwaI", recognition: "ATTTAAAT", kind: "Type II", cutTop: 4, cutBottom: 4 },
+  { name: "XbaI", recognition: "TCTAGA", kind: "Type II", cutTop: 1, cutBottom: 5 },
+  { name: "XhoI", recognition: "CTCGAG", kind: "Type II", cutTop: 1, cutBottom: 5 },
 ];
 
 export function reverseComplement(sequence: string) {
@@ -236,4 +258,75 @@ export function findRestrictionSites(
   }
 
   return sites.sort((a, b) => a.position - b.position || a.enzyme.name.localeCompare(b.enzyme.name));
+}
+
+export function simulateRestrictionDigest(
+  sequence: string,
+  enzymeNames: string[],
+  circular = false,
+): RestrictionDigest {
+  const length = sequence.length;
+  const selected = new Set(enzymeNames);
+  const enzymes = RESTRICTION_ENZYMES.filter(({ name }) => selected.has(name));
+  const sites = findRestrictionSites(sequence, enzymes, circular);
+  const cutsByPosition = new Map<number, Set<string>>();
+
+  for (const site of sites) {
+    const recognitionStart = site.position - 1;
+    const rawCut = site.strand === "+"
+      ? recognitionStart + site.enzyme.cutTop
+      : recognitionStart + site.enzyme.recognition.length - site.enzyme.cutBottom;
+    const position = circular && length
+      ? ((rawCut % length) + length) % length
+      : rawCut;
+    if (!circular && (position <= 0 || position >= length)) continue;
+    const enzymeSet = cutsByPosition.get(position) ?? new Set<string>();
+    enzymeSet.add(site.enzyme.name);
+    cutsByPosition.set(position, enzymeSet);
+  }
+
+  const cuts = [...cutsByPosition.entries()]
+    .map(([position, names]) => ({ position, enzymes: [...names].sort() }))
+    .sort((a, b) => a.position - b.position);
+  const fragments: DigestFragment[] = [];
+
+  if (circular) {
+    if (!cuts.length) {
+      fragments.push({ id: "uncut-circular", start: 1, end: length, length, wrapsOrigin: false });
+    } else {
+      cuts.forEach((cut, index) => {
+        const next = cuts[(index + 1) % cuts.length];
+        const fragmentLength = next.position > cut.position
+          ? next.position - cut.position
+          : length - cut.position + next.position;
+        fragments.push({
+          id: `circular-${cut.position}-${next.position}`,
+          start: (cut.position % length) + 1,
+          end: next.position === 0 ? length : next.position,
+          length: fragmentLength,
+          wrapsOrigin: next.position <= cut.position,
+        });
+      });
+    }
+  } else {
+    const boundaries = [0, ...cuts.map(({ position }) => position), length];
+    for (let index = 0; index < boundaries.length - 1; index += 1) {
+      const startBoundary = boundaries[index];
+      const endBoundary = boundaries[index + 1];
+      fragments.push({
+        id: `linear-${startBoundary}-${endBoundary}`,
+        start: startBoundary + 1,
+        end: endBoundary,
+        length: endBoundary - startBoundary,
+        wrapsOrigin: false,
+      });
+    }
+  }
+
+  return {
+    enzymeNames: enzymes.map(({ name }) => name),
+    cuts,
+    fragments: fragments.sort((a, b) => b.length - a.length || a.start - b.start),
+    circular,
+  };
 }

@@ -8,6 +8,7 @@ import {
   OrfStartMode,
   RESTRICTION_ENZYMES,
   RestrictionSite,
+  simulateRestrictionDigest,
 } from "./sequence-analysis";
 
 type Props = {
@@ -34,11 +35,20 @@ function rangeLabel(item: OpenReadingFrame) {
   return item.wrapsOrigin ? `${item.start} → origin → ${item.end}` : `${item.start}–${item.end}`;
 }
 
+function gelPosition(fragmentLength: number, maximumLength: number) {
+  const minimum = Math.max(20, Math.min(100, maximumLength));
+  const maximum = Math.max(minimum + 1, maximumLength);
+  const value = Math.max(minimum, Math.min(maximum, fragmentLength));
+  const ratio = (Math.log10(maximum) - Math.log10(value)) / (Math.log10(maximum) - Math.log10(minimum));
+  return 10 + ratio * 80;
+}
+
 export function AnalysisPanels({ sequence, circular }: Props) {
   const [minimumAminoAcids, setMinimumAminoAcids] = useState(50);
   const [startMode, setStartMode] = useState<OrfStartMode>("atg");
   const [enzymeQuery, setEnzymeQuery] = useState("");
   const [cutterMode, setCutterMode] = useState<CutterMode>("all");
+  const [selectedDigestEnzymes, setSelectedDigestEnzymes] = useState<string[]>([]);
 
   const orfs = useMemo(
     () => findOpenReadingFrames(sequence, { minAminoAcids: minimumAminoAcids, startMode, circular }),
@@ -74,9 +84,17 @@ export function AnalysisPanels({ sequence, circular }: Props) {
     () => visibleEnzymeRows.flatMap(({ sites }) => sites),
     [visibleEnzymeRows],
   );
+  const digest = useMemo(
+    () => simulateRestrictionDigest(sequence, selectedDigestEnzymes, circular),
+    [sequence, selectedDigestEnzymes, circular],
+  );
   const longestOrfs = orfs.slice(0, 10);
   const forwardCount = orfs.filter(({ strand }) => strand === "+").length;
   const reverseCount = orfs.length - forwardCount;
+
+  function toggleDigestEnzyme(name: string) {
+    setSelectedDigestEnzymes((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]);
+  }
 
   return (
     <section className="analysis-suite" aria-labelledby="analysis-heading">
@@ -203,10 +221,11 @@ export function AnalysisPanels({ sequence, circular }: Props) {
 
           <div className="analysis-table-wrap enzyme-table-wrap">
             <table className="analysis-table enzyme-table">
-              <thead><tr><th>Enzyme</th><th>Recognition</th><th>Sites</th><th>Coordinates</th></tr></thead>
+              <thead><tr><th>Digest</th><th>Enzyme</th><th>Recognition</th><th>Sites</th><th>Coordinates</th></tr></thead>
               <tbody>
                 {visibleEnzymeRows.slice(0, 24).map(({ enzyme, sites }) => (
                   <tr key={enzyme.name}>
+                    <td><input className="digest-checkbox" type="checkbox" checked={selectedDigestEnzymes.includes(enzyme.name)} onChange={() => toggleDigestEnzyme(enzyme.name)} aria-label={`Include ${enzyme.name} in digest`} /></td>
                     <td><strong>{enzyme.name}</strong>{enzyme.kind === "Type IIS" && <span className="type-tag">IIS</span>}</td>
                     <td className="recognition-sequence">{enzyme.recognition}</td>
                     <td>{sites.length}</td>
@@ -218,6 +237,60 @@ export function AnalysisPanels({ sequence, circular }: Props) {
             {!visibleEnzymeRows.length && <p className="analysis-empty">No cutting enzymes match this filter.</p>}
             {visibleEnzymeRows.length > 24 && <p className="table-note">Showing 24 of {visibleEnzymeRows.length} cutting enzymes.</p>}
           </div>
+
+          <section className="digest-simulator" aria-labelledby="digest-heading">
+            <div className="digest-heading">
+              <div>
+                <span className="analysis-number">03</span>
+                <h5 id="digest-heading">Restriction digest</h5>
+                <p>Select enzymes in the table above to simulate fragment sizes and a gel lane.</p>
+              </div>
+              {selectedDigestEnzymes.length > 0 && <button type="button" className="text-button" onClick={() => setSelectedDigestEnzymes([])}>Clear digest</button>}
+            </div>
+
+            {selectedDigestEnzymes.length ? (
+              <>
+                <div className="digest-chip-row">
+                  {selectedDigestEnzymes.map((name) => <button type="button" key={name} onClick={() => toggleDigestEnzyme(name)}>{name}<span aria-hidden="true">×</span></button>)}
+                </div>
+                <div className="digest-output">
+                  <div className="digest-gel-column">
+                    <div className="digest-gel-label"><span>Wells</span><b>{circular ? "Circular" : "Linear"} digest</b></div>
+                    <div className="digest-gel" role="img" aria-label={`Simulated gel lane with ${digest.fragments.length} DNA fragments`}>
+                      <i className="gel-well" />
+                      {digest.fragments.map((fragment) => (
+                        <span
+                          className="gel-band"
+                          key={fragment.id}
+                          style={{ top: `${gelPosition(fragment.length, sequence.length)}%`, opacity: Math.min(.95, .44 + fragment.length / sequence.length) }}
+                          title={`${numberFormatter.format(fragment.length)} bp`}
+                        />
+                      ))}
+                    </div>
+                    <small>Migration is a logarithmic size estimate.</small>
+                  </div>
+                  <div className="digest-results">
+                    <div className="digest-totals">
+                      <span><strong>{digest.cuts.length}</strong> cut{digest.cuts.length === 1 ? "" : "s"}</span>
+                      <span><strong>{digest.fragments.length}</strong> fragment{digest.fragments.length === 1 ? "" : "s"}</span>
+                    </div>
+                    <div className="digest-fragments">
+                      {digest.fragments.slice(0, 30).map((fragment, index) => (
+                        <div key={fragment.id}>
+                          <span>#{index + 1}</span>
+                          <strong>{numberFormatter.format(fragment.length)} bp</strong>
+                          <small>{numberFormatter.format(fragment.start)}–{numberFormatter.format(fragment.end)}{fragment.wrapsOrigin ? " · crosses origin" : ""}</small>
+                        </div>
+                      ))}
+                    </div>
+                    {digest.fragments.length > 30 && <p className="table-note">Showing the 30 largest fragments.</p>}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="digest-empty"><span>↳</span><p>Tick one or more cutting enzymes above to build a virtual digest.</p></div>
+            )}
+          </section>
         </article>
       </div>
     </section>

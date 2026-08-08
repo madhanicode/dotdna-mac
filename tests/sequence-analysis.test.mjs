@@ -5,6 +5,7 @@ import {
   findRestrictionSites,
   RESTRICTION_ENZYMES,
   reverseComplement,
+  simulateRestrictionDigest,
 } from "../app/sequence-analysis.ts";
 
 test("finds forward and reverse open reading frames", () => {
@@ -36,4 +37,15 @@ test("finds a restriction site that crosses a circular origin", () => {
   assert.equal(sites.length, 1);
   assert.equal(sites[0].position, 10);
   assert.equal(sites[0].wrapsOrigin, true);
+});
+
+test("simulates linear and circular restriction digest fragments", () => {
+  const linear = simulateRestrictionDigest("AAAAGAATTCTTTTGAATTCAAA", ["EcoRI"], false);
+  assert.deepEqual(linear.cuts.map(({ position }) => position), [5, 15]);
+  assert.deepEqual(linear.fragments.map(({ length }) => length), [10, 8, 5]);
+
+  const circular = simulateRestrictionDigest("AAAAGAATTCTTTTGAATTCAAA", ["EcoRI"], true);
+  assert.equal(circular.cuts.length, 2);
+  assert.deepEqual(circular.fragments.map(({ length }) => length), [13, 10]);
+  assert.equal(circular.fragments.reduce((sum, fragment) => sum + fragment.length, 0), 23);
 });

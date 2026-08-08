@@ -2,6 +2,8 @@
 
 import { ChangeEvent, DragEvent, FormEvent, useMemo, useRef, useState } from "react";
 import { AnalysisPanels } from "./AnalysisPanels";
+import { DocumentInspector } from "./DocumentInspector";
+import { PlasmidMap } from "./PlasmidMap";
 import { parseSnapGene, SnapGeneData, SnapGeneFeature, toFasta } from "./snapgene";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -151,6 +153,11 @@ export default function Home() {
         type: annotationType.trim() || "misc_feature",
         range: `${start}-${end}`,
         color: annotationColor,
+        directionality: 1,
+        strand: "+",
+        segments: [{ range: `${start}-${end}`, start, end, color: annotationColor, name: null, type: "standard" }],
+        qualifiers: [],
+        readingFrame: null,
       },
     ]);
     setAnnotationName("");
@@ -180,7 +187,8 @@ export default function Home() {
           <h1>Your DNA sequence,<br /><em>out in the open.</em></h1>
           <p className="lede">
             Drop in a SnapGene <code>.dna</code> file. Get the full sequence,
-            useful stats, annotations, ORFs, restriction sites, and a clean FASTA export in seconds.
+            a circular plasmid map, document metadata, annotations, ORFs, restriction digests,
+            and a clean FASTA export in seconds.
           </p>
           <div className="hero-proof" aria-label="Product benefits">
             <span>No account</span>
@@ -244,6 +252,8 @@ export default function Home() {
             <article><span>Features</span><strong>{annotations.length}</strong><small>{customAnnotations.length ? `${data.features.length} from file · ${customAnnotations.length} added` : "annotations found"}</small></article>
           </div>
 
+          <PlasmidMap fileName={fileName} sequence={data.sequence} circular={data.circular} features={annotations} />
+
           <section className="annotation-section" aria-labelledby="annotation-heading">
             <div className="annotation-header">
               <div>
@@ -294,7 +304,9 @@ export default function Home() {
             <p className="session-note">Added annotations stay in this browser session and do not change the original SnapGene file.</p>
           </section>
 
-          <AnalysisPanels sequence={data.sequence} circular={data.circular} />
+          <DocumentInspector data={data} />
+
+          <AnalysisPanels key={fileName} sequence={data.sequence} circular={data.circular} />
 
           <div className="result-layout">
             <div className="sequence-panel">
@@ -346,8 +358,8 @@ export default function Home() {
             <h2>From binary file<br />to readable biology.</h2>
           </div>
           <div className="steps">
-            <article><span>01</span><h3>Decode</h3><p>Reads the native SnapGene packet format directly in your browser.</p></article>
-            <article><span>02</span><h3>Inspect</h3><p>Shows sequence length, GC content, topology, and saved features.</p></article>
+            <article><span>01</span><h3>Decode</h3><p>Indexes every native SnapGene packet and reads the structured sequence data.</p></article>
+            <article><span>02</span><h3>Inspect</h3><p>Maps annotations, ORFs, metadata, enzymes, and simulated digest fragments.</p></article>
             <article><span>03</span><h3>Take it</h3><p>Copy every base or download a ready-to-use FASTA file.</p></article>
           </div>
         </section>
@@ -356,7 +368,7 @@ export default function Home() {
       <footer>
         <a className="brand footer-brand" href="#top">DOTDNA</a>
         <p>Small tool. Clear sequence.</p>
-        <p className="footer-tech">SnapGene .dna → plain text + FASTA</p>
+        <p className="footer-tech">SnapGene .dna → map + analysis + FASTA</p>
       </footer>
     </main>
   );

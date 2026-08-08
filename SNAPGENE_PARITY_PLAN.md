@@ -17,11 +17,11 @@ This roadmap inventories SnapGene’s publicly documented capability surface and
 
 | Area | Current capability | Next fidelity target |
 |---|---|---|
-| SnapGene reading | Reads native `.dna` packets, sequence, topology, and simple feature segments | Parse primers, notes, metadata, feature qualifiers/segments, enzyme state, alignments, and history |
+| SnapGene reading | Validates and indexes every packet; decodes sequence, topology, multisegment/directional features, qualifiers, primers, notes, end chemistry, enzyme visibility, and format metadata | Decode proprietary binary display, enzyme-data, alignment, and history payloads against a representative corpus |
 | Sequence view | Full sequence, coordinates, motif search, copy, FASTA export | Inline overlays, selection, zoom, editing, translations, primers, and cut markers |
-| Features | Displays a scaled annotation map; adds/removes session annotations | Multi-segment features, directionality, qualifiers, CDS translation, introns, point features, persistence, import/export |
+| Features | Displays linear and interactive circular annotation maps; reads multi-segment features, directionality, qualifiers; adds/removes session annotations | CDS translation, introns, point features, editing/persistence, import/export |
 | ORFs | Six-frame prediction, forward/reverse colors, minimum length and start-codon controls | Alternate genetic codes, no-start/incomplete ORFs, circular edge-case validation, convert ORF to CDS |
-| Restriction sites | Searchable Type II/Type IIS catalog, cutter filters, coordinate overview, circular-origin matching | Full curated enzyme database, cut offsets/overhangs, methylation sensitivity, enzyme sets, noncutters, digest fragments |
+| Restriction sites | Searchable Type II/Type IIS catalog, cutter filters, circular-origin matching, cut geometry, multi-enzyme fragment calculation, and virtual gel lane | Full curated enzyme database, methylation sensitivity, enzyme sets, partial digests, and configurable gel conditions |
 
 ## Complete capability inventory
 
@@ -147,22 +147,25 @@ This roadmap inventories SnapGene’s publicly documented capability surface and
 
 Estimates are rough single-team engineering ranges and should be refined after technical spikes and acceptance-test design.
 
-### Phase 0 — analysis foundation (complete for this milestone)
+### Phase 0 — analysis foundation (complete)
 
 - Native `.dna` sequence/topology/basic-feature read.
 - Sequence/statistics/motif view and FASTA export.
 - Annotation display and session additions.
 - Six-frame ORF scan with minimum-length/start controls.
 - Common restriction-site catalog with search, cutter filters, circular-origin matching, map, and coordinates.
+- Packet-complete file inventory with high-value XML packet decoding.
+- Interactive circular feature/enzyme map.
+- Multi-enzyme restriction digest fragments and virtual gel lane.
 
-### Phase 1 — high-fidelity viewer (3–5 weeks)
+### Phase 1 — high-fidelity viewer (partially complete; 3–5 weeks total)
 
 - Parse every known `.dna` packet used by a representative corpus: feature qualifiers/segments/direction, primers, notes, references, metadata, display settings, alignments, and history.
 - Circular/linear plasmid map, minimap, inline sequence overlays, synchronized selection, pan/zoom, labels, and export.
 - Snapshot/golden tests against a licensed reference corpus without embedding proprietary data.
 - Deliverable: reliable browser replacement for SnapGene Viewer workflows.
 
-### Phase 2 — complete translations and enzymes (3–5 weeks)
+### Phase 2 — complete translations and enzymes (partially complete; 3–5 weeks total)
 
 - Genetic-code selector, incomplete/no-start ORFs, translated features, introns, frameshifts, alternative starts, protein export, and ORF→CDS.
 - Independent full enzyme dataset, cut geometry, overhangs, methylation, enzyme sets, noncutters, fragment sizes, and digest engine.
@@ -215,10 +218,10 @@ Estimates are rough single-team engineering ranges and should be refined after t
 - Privacy is explicit: local processing by default, clear consent for every network operation, and no hidden analytics on sequence contents.
 - Parity claims require workflow-level acceptance tests against current official documentation and a legally obtained reference installation.
 
-## Immediate next sprint after this milestone
+## Immediate next sprint after the circular-map and digest milestone
 
-1. Complete the `.dna` packet inventory and add multi-segment/directional feature parsing.
-2. Build synchronized circular map + sequence overlays for features, ORFs, and enzyme cut positions.
-3. Add cut offsets/overhangs and restriction-fragment calculations to the enzyme engine.
-4. Convert predicted ORFs into editable CDS annotations with translated protein export.
+1. Add synchronized selection, zoom, and editable feature geometry across circular, linear, and sequence views.
+2. Decode history/alignment/display binary packets against a legally obtained multi-version fixture corpus.
+3. Convert predicted ORFs into editable CDS annotations with translated protein export.
+4. Expand the enzyme catalog with overhang display, methylation sensitivity, supplier sets, and partial digests.
 5. Establish the history command model before sequence editing begins.
