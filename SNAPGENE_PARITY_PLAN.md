@@ -18,8 +18,8 @@ This roadmap inventories SnapGene’s publicly documented capability surface and
 | Area | Current capability | Next fidelity target |
 |---|---|---|
 | SnapGene reading | Validates and indexes every packet; decodes sequence, topology, multisegment/directional features, qualifiers, primers, notes, end chemistry, enzyme visibility, and format metadata | Decode proprietary binary display, enzyme-data, alignment, and history payloads against a representative corpus |
-| Sequence view | Full sequence, coordinates, motif search, copy, FASTA/GenBank/project export, insert/delete/replace, reverse complement, topology changes, undo/redo | Inline overlays, synchronized selection, zoom, direct base editing, translations, primers, and cut markers |
-| Features | Displays linear and interactive circular maps; reads multi-segment features, directionality, qualifiers; adds/edits/removes annotations and remaps them across sequence edits | CDS translation, introns, point-feature UI, rich qualifier editing, persistent project library |
+| Sequence view | Annotated double-stranded sequence rows with coordinates, mouse-drag selection, insertion caret, direct typing, cut/copy/paste/replace/delete, keyboard shortcuts, motif highlighting, coordinate editing, and undo/redo | Synchronized map selection, zoom/minimap, virtualization for chromosome-scale sequences, translations, primers, and cut markers |
+| Features | Displays linear and interactive circular maps plus stacked inline sequence annotations; reads multi-segment features, directionality, qualifiers; adds/edits/removes annotations and remaps them across sequence edits | CDS translation, introns, point-feature UI, rich qualifier editing, persistent project library |
 | ORFs | Six-frame prediction, forward/reverse colors, minimum length and start-codon controls, and one-click predicted ORF→CDS annotations with translation qualifiers | Alternate genetic codes, no-start/incomplete ORFs, circular edge-case validation, and intron-aware translation |
 | Restriction sites | Searchable Type II/Type IIS catalog, cutter filters, circular-origin matching, cut geometry, multi-enzyme fragment calculation, and virtual gel lane | Full curated enzyme database, methylation sensitivity, enzyme sets, partial digests, and configurable gel conditions |
 | Primers and PCR | Primer library, GC/Tm/MW calculations, exact forward/reverse binding, inward-facing PCR products, amplicon FASTA export, and heuristic PCR/sequencing primer-pair design | Mismatches/tails, secondary structure, richer thermodynamics, inverse/overlap PCR, mutagenesis |
@@ -166,6 +166,7 @@ Estimates are rough single-team engineering ranges and should be refined after t
 
 - Parse every known `.dna` packet used by a representative corpus: feature qualifiers/segments/direction, primers, notes, references, metadata, display settings, alignments, and history.
 - Circular/linear plasmid map, minimap, inline sequence overlays, synchronized selection, pan/zoom, labels, and export.
+- Inline annotation tracks, feature-colored bases, mouse selection, and direct sequence editing are now available; map synchronization, minimap, and zoom remain.
 - Snapshot/golden tests against a licensed reference corpus without embedding proprietary data.
 - Deliverable: reliable browser replacement for SnapGene Viewer workflows.
 
@@ -178,6 +179,7 @@ Estimates are rough single-team engineering ranges and should be refined after t
 ### Phase 3 — editor, annotations, and formats (partially complete; 5–8 weeks total)
 
 - Transactional sequence editing, ends/topology, multi-segment features, qualifiers, primers, custom feature types, and undo/redo command bus.
+- Mouse/keyboard cut, copy, paste, replace, delete, insert, and direct base typing now use the same coordinate-aware feature remapping and undo/redo history as form edits.
 - GenBank/EMBL/GFF/BED/FASTA/protein import/export plus map/PDF/image exports.
 - History model begins recording all edits and imports.
 - Deliverable: day-to-day sequence editing and annotation parity.
@@ -230,4 +232,4 @@ Estimates are rough single-team engineering ranges and should be refined after t
 2. Upgrade primer thermodynamics and add mismatches, tails, inverse PCR, overlap PCR, and mutagenesis workflows.
 3. Add translated-feature editing, intron-aware CDS display, alternate genetic codes, and protein properties.
 4. Extend verification to local/semi-global alignment, reverse-complement query selection, coverage tracks, and Sanger trace import.
-5. Add synchronized selection/zoom/inline overlays, then decode history/alignment/display binary packets and introduce saved local project collections.
+5. Synchronize the new sequence selection with map focus, add zoom/virtualization and translation/primer/restriction overlays, then decode history/alignment/display binary packets and introduce saved local project collections.

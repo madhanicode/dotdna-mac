@@ -36,27 +36,6 @@ function coordinates(range: string | null) {
   return match ? { start: Number(match[1]), end: Number(match[2]) } : null;
 }
 
-function formatSequence(sequence: string) {
-  const lines: string[] = [];
-  for (let index = 0; index < sequence.length; index += 60) {
-    const bases = sequence.slice(index, index + 60);
-    const grouped = bases.match(/.{1,10}/g)?.join(" ") ?? bases;
-    lines.push(`${String(index + 1).padStart(8, " ")}  ${grouped}`);
-  }
-  return lines.join("\n");
-}
-
-function countMotif(sequence: string, motif: string) {
-  if (!motif) return 0;
-  let count = 0;
-  let start = 0;
-  while ((start = sequence.indexOf(motif, start)) !== -1) {
-    count += 1;
-    start += 1;
-  }
-  return count;
-}
-
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [data, setData] = useState<SnapGeneData | null>(null);
@@ -83,14 +62,6 @@ export default function Home() {
   const [undoStack, setUndoStack] = useState<WorkspaceSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<WorkspaceSnapshot[]>([]);
 
-  const formattedSequence = useMemo(
-    () => (data ? formatSequence(data.sequence) : ""),
-    [data],
-  );
-  const motifHits = useMemo(
-    () => (data ? countMotif(data.sequence, motif) : 0),
-    [data, motif],
-  );
   const annotations = useMemo<DisplayAnnotation[]>(
     () => [
       ...(data?.features ?? []).map((feature, index) => ({
@@ -204,6 +175,18 @@ export default function Home() {
     const safeName = `${name.trim() || "assembly"}.dna`;
     loadWorkspace(createSequenceData(result.sequence, { circular: result.circular }), safeName, "DOTDNA Assembly");
     window.setTimeout(() => document.querySelector("#map")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
+  function annotateSelection(start: number, end: number) {
+    setEditingAnnotationId(null);
+    setAnnotationName("");
+    setAnnotationStart(String(start));
+    setAnnotationEnd(String(end));
+    setAnnotationType("misc_feature");
+    setAnnotationColor("#17b6c9");
+    setAnnotationError("");
+    setShowAnnotationForm(true);
+    window.setTimeout(() => document.querySelector("#annotations")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   }
 
   async function readFile(file?: File) {
@@ -522,50 +505,7 @@ export default function Home() {
 
           <DesignVerifyTools key={`${fileName}-design`} fileName={fileName} sequence={data.sequence} onOpenProduct={openAssemblyProduct} />
 
-          <SequenceEditor sequence={data.sequence} circular={data.circular} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} />
-
-          <div className="result-layout" id="sequence">
-            <div className="sequence-panel">
-              <div className="panel-toolbar">
-                <div>
-                  <span className="panel-kicker">FULL SEQUENCE</span>
-                  <span className="base-legend"><i className="a">A</i><i className="c">C</i><i className="g">G</i><i className="t">T</i></span>
-                </div>
-                <label className="motif-search">
-                  <span>Find motif</span>
-                  <input
-                    value={motif}
-                    onChange={(event) => setMotif(event.target.value.toUpperCase().replace(/[^ACGTRYSWKMBDHVN]/g, ""))}
-                    placeholder="e.g. GAATTC"
-                    spellCheck={false}
-                  />
-                  {motif && <b>{motifHits} {motifHits === 1 ? "match" : "matches"}</b>}
-                </label>
-              </div>
-              <pre className="sequence-output" tabIndex={0}>{formattedSequence}</pre>
-              <div className="sequence-footer">
-                <span>{numberFormatter.format(data.length)} bases total</span>
-                {data.unknownBases > 0 && <span>{numberFormatter.format(data.unknownBases)} ambiguous</span>}
-              </div>
-            </div>
-
-            <aside className="features-panel">
-              <div className="panel-kicker">ANNOTATIONS</div>
-              {annotations.length ? (
-                <ol className="feature-list">
-                  {annotations.map((feature) => (
-                    <li key={feature.id}>
-                      <span className="feature-swatch" style={{ backgroundColor: feature.color ?? "#17b6c9" }} />
-                      <div><strong>{feature.name}</strong><small>{feature.range ?? feature.type.replaceAll("_", " ")} · {feature.isCustom ? "added" : "file"}</small></div>
-                      <div className="feature-actions"><button type="button" onClick={() => editAnnotation(feature)} aria-label={`Edit ${feature.name}`}>Edit</button><button className="remove-annotation" type="button" onClick={() => removeAnnotation(feature)} aria-label={`Remove ${feature.name}`}>×</button></div>
-                    </li>
-                  ))}
-                </ol>
-              ) : (
-                <p className="empty-features">No annotated features were included in this file.</p>
-              )}
-            </aside>
-          </div>
+          <SequenceEditor sequence={data.sequence} circular={data.circular} features={annotations} motif={motif} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} onMotifChange={setMotif} onAnnotateSelection={annotateSelection} onEditAnnotation={(featureIndex) => editAnnotation(annotations[featureIndex])} onRemoveAnnotation={(featureIndex) => removeAnnotation(annotations[featureIndex])} />
 
           <DocumentInspector data={data} />
         </section>
