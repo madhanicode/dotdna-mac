@@ -2,7 +2,8 @@ import type { SnapGeneFeature, SnapGeneSegment } from "./snapgene.ts";
 
 export type RowAnnotation = {
   id: string;
-  featureIndex: number;
+  featureIndex: number | null;
+  kind: "feature" | "primer" | "restriction" | "orf";
   name: string;
   color: string;
   strand: "+" | "-" | "both" | null;
@@ -11,6 +12,16 @@ export type RowAnnotation = {
   startOffset: number;
   endOffset: number;
   lane: number;
+};
+
+export type SequenceOverlay = {
+  id: string;
+  kind: "primer" | "restriction" | "orf";
+  name: string;
+  color: string;
+  strand: "+" | "-" | "both" | null;
+  start: number;
+  end: number;
 };
 
 export type AnnotatedSequenceRow = {
@@ -48,7 +59,13 @@ export function featureIntervals(feature: SnapGeneFeature, sequenceLength: numbe
   });
 }
 
-export function buildAnnotatedSequenceRows(sequence: string, features: SnapGeneFeature[], lineWidth = 60): AnnotatedSequenceRow[] {
+function overlayIntervals(overlay: SequenceOverlay, sequenceLength: number) {
+  const start = Math.max(1, Math.min(sequenceLength, overlay.start));
+  const end = Math.max(1, Math.min(sequenceLength, overlay.end));
+  return end >= start ? [{ start, end }] : [{ start, end: sequenceLength }, { start: 1, end }];
+}
+
+export function buildAnnotatedSequenceRows(sequence: string, features: SnapGeneFeature[], lineWidth = 60, overlays: SequenceOverlay[] = []): AnnotatedSequenceRow[] {
   const width = Math.max(10, Math.floor(lineWidth));
   const rows: AnnotatedSequenceRow[] = [];
   for (let offset = 0; offset < sequence.length; offset += width) {
@@ -64,6 +81,7 @@ export function buildAnnotatedSequenceRows(sequence: string, features: SnapGeneF
         annotations.push({
           id: `${featureIndex}-${segmentIndex}-${start}`,
           featureIndex,
+          kind: "feature",
           name: feature.name,
           color: interval.color,
           strand: feature.strand,
@@ -75,9 +93,29 @@ export function buildAnnotatedSequenceRows(sequence: string, features: SnapGeneF
       });
     });
 
+    overlays.forEach((overlay) => {
+      overlayIntervals(overlay, sequence.length).forEach((interval, segmentIndex) => {
+        const overlapStart = Math.max(start, interval.start);
+        const overlapEnd = Math.min(end, interval.end);
+        if (overlapEnd < overlapStart) return;
+        annotations.push({
+          id: `${overlay.id}-${segmentIndex}-${start}`,
+          featureIndex: null,
+          kind: overlay.kind,
+          name: overlay.name,
+          color: overlay.color,
+          strand: overlay.strand,
+          start: overlapStart,
+          end: overlapEnd,
+          startOffset: overlapStart - start,
+          endOffset: overlapEnd - start,
+        });
+      });
+    });
+
     const laneEnds: number[] = [];
     const placed = annotations
-      .sort((a, b) => a.startOffset - b.startOffset || b.endOffset - a.endOffset || a.featureIndex - b.featureIndex)
+      .sort((a, b) => a.startOffset - b.startOffset || b.endOffset - a.endOffset || (a.featureIndex ?? Number.MAX_SAFE_INTEGER) - (b.featureIndex ?? Number.MAX_SAFE_INTEGER))
       .map((annotation): RowAnnotation => {
         let lane = laneEnds.findIndex((laneEnd) => annotation.startOffset > laneEnd);
         if (lane < 0) {

@@ -177,18 +177,6 @@ export default function Home() {
     window.setTimeout(() => document.querySelector("#map")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   }
 
-  function annotateSelection(start: number, end: number) {
-    setEditingAnnotationId(null);
-    setAnnotationName("");
-    setAnnotationStart(String(start));
-    setAnnotationEnd(String(end));
-    setAnnotationType("misc_feature");
-    setAnnotationColor("#17b6c9");
-    setAnnotationError("");
-    setShowAnnotationForm(true);
-    window.setTimeout(() => document.querySelector("#annotations")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
-  }
-
   async function readFile(file?: File) {
     if (!file) return;
     setError("");
@@ -316,17 +304,32 @@ export default function Home() {
     setEditingAnnotationId(null);
   }
 
-  function editAnnotation(feature: DisplayAnnotation) {
-    const position = coordinates(feature.range);
-    setEditingAnnotationId(feature.id);
-    setAnnotationName(feature.name);
-    setAnnotationType(feature.type);
-    setAnnotationStart(String(position?.start ?? 1));
-    setAnnotationEnd(String(position?.end ?? data?.length ?? ""));
-    setAnnotationColor(feature.color ?? "#17b6c9");
-    setAnnotationError("");
-    setShowAnnotationForm(true);
-    document.querySelector("#annotations")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  function saveInlineAnnotation(featureIndex: number | null, draft: { name: string; type: string; color: string; start: number; end: number }) {
+    if (!data) return;
+    const existing = featureIndex === null ? null : annotations[featureIndex];
+    const range = `${draft.start}-${draft.end}`;
+    const annotation: DisplayAnnotation = {
+      ...(existing ?? {} as DisplayAnnotation),
+      id: existing?.id ?? `added-${Date.now()}`,
+      isCustom: existing?.isCustom ?? true,
+      name: draft.name,
+      type: draft.type,
+      range,
+      color: draft.color,
+      directionality: existing?.directionality ?? 1,
+      strand: existing?.strand ?? "+",
+      segments: [{ range, start: draft.start, end: draft.end, color: draft.color, name: null, type: "standard" }],
+      qualifiers: existing?.qualifiers ?? [],
+      readingFrame: existing?.readingFrame ?? null,
+    };
+    if (existing && !existing.isCustom) {
+      const fileIndex = Number(existing.id.replace("file-", ""));
+      commitWorkspace(updateSequenceData(data, data.sequence, { features: data.features.map((feature, index) => index === fileIndex ? annotation : feature) }), customAnnotations, `Edited annotation ${draft.name}`);
+    } else if (existing) {
+      commitWorkspace(data, customAnnotations.map((feature) => feature.id === existing.id ? annotation : feature), `Edited annotation ${draft.name}`);
+    } else {
+      commitWorkspace(data, [...customAnnotations, annotation], `Added annotation ${draft.name}`);
+    }
   }
 
   function removeAnnotation(feature: DisplayAnnotation) {
@@ -355,8 +358,8 @@ export default function Home() {
 
       <section className="hero" id="top">
         <div className="hero-copy">
-          <p className="eyebrow">SnapGene sequence reader</p>
-          <h1>Your DNA sequence,<br /><em>out in the open.</em></h1>
+          <p className="eyebrow">Local-first plasmid workspace</p>
+          <h1>Your plasmids,<br /><em>ready to work.</em></h1>
           <p className="lede">
             Open SnapGene, GenBank, FASTA, DOTDNA projects, or paste raw DNA. Map, edit,
             annotate, design primers, assemble fragments, verify alignments, simulate PCR and digests,
@@ -505,7 +508,7 @@ export default function Home() {
 
           <DesignVerifyTools key={`${fileName}-design`} fileName={fileName} sequence={data.sequence} onOpenProduct={openAssemblyProduct} />
 
-          <SequenceEditor sequence={data.sequence} circular={data.circular} features={annotations} motif={motif} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} onMotifChange={setMotif} onAnnotateSelection={annotateSelection} onEditAnnotation={(featureIndex) => editAnnotation(annotations[featureIndex])} onRemoveAnnotation={(featureIndex) => removeAnnotation(annotations[featureIndex])} />
+          <SequenceEditor sequence={data.sequence} circular={data.circular} features={annotations} primers={data.primers} motif={motif} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} onMotifChange={setMotif} onSaveAnnotation={saveInlineAnnotation} onRemoveAnnotation={(featureIndex) => removeAnnotation(annotations[featureIndex])} />
 
           <DocumentInspector data={data} />
         </section>

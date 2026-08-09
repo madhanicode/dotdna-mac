@@ -27,6 +27,17 @@ test("assigns overlapping annotations to separate lanes", () => {
   assert.deepEqual(row.annotations.map(({ lane }) => lane), [0, 1]);
 });
 
+test("places feature, primer, restriction, and ORF overlays in the same row model", () => {
+  const overlays = [
+    { id: "primer-1", kind: "primer", name: "Fwd", color: "#7755cc", strand: "+", start: 10, end: 25 },
+    { id: "site-1", kind: "restriction", name: "EcoRI", color: "#0f8278", strand: "+", start: 20, end: 25 },
+    { id: "orf-1", kind: "orf", name: "ORF +1", color: "#ef9e38", strand: "+", start: 30, end: 55 },
+  ];
+  const [row] = buildAnnotatedSequenceRows("A".repeat(60), [feature("gene", 1, 12)], 60, overlays);
+  assert.deepEqual([...new Set(row.annotations.map(({ kind }) => kind))], ["feature", "primer", "restriction", "orf"]);
+  assert.equal(row.laneCount >= 2, true);
+});
+
 test("expands an origin-wrapping segment into two intervals", () => {
   assert.deepEqual(featureIntervals(feature("wrap", 90, 10), 100).map(({ start, end }) => [start, end]), [[90, 100], [1, 10]]);
 });

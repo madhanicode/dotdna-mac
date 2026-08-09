@@ -3,13 +3,17 @@
 import type { CSSProperties, ClipboardEvent, FormEvent, KeyboardEvent, MouseEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildAnnotatedSequenceRows, featuresOverlappingRange, motifBasePositions } from "./annotated-sequence";
+import type { SequenceOverlay } from "./annotated-sequence";
+import { findPrimerBindings } from "./molecular-biology";
 import { SequenceEdit } from "./sequence-edit";
-import type { SnapGeneFeature } from "./snapgene";
+import { findOpenReadingFrames, findRestrictionSites, RESTRICTION_ENZYMES } from "./sequence-analysis";
+import type { SnapGeneFeature, SnapGenePrimer } from "./snapgene";
 
 type Props = {
   sequence: string;
   circular: boolean;
   features: SnapGeneFeature[];
+  primers: SnapGenePrimer[];
   motif: string;
   canUndo: boolean;
   canRedo: boolean;
@@ -19,14 +23,15 @@ type Props = {
   onRedo: () => void;
   onTopologyChange: (circular: boolean) => void;
   onMotifChange: (motif: string) => void;
-  onAnnotateSelection: (start: number, end: number) => void;
-  onEditAnnotation: (featureIndex: number) => void;
+  onSaveAnnotation: (featureIndex: number | null, annotation: { name: string; type: string; color: string; start: number; end: number }) => void;
   onRemoveAnnotation: (featureIndex: number) => void;
 };
 
 type EditMode = "insert" | "replace" | "delete";
 type DirectInputAction = "insert" | "replace" | "paste";
 type BaseSelection = { start: number; end: number };
+type RestrictionMode = "unique" | "double" | "all";
+type AnnotationDraft = { featureIndex: number | null; name: string; type: string; color: string; start: string; end: string };
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 const lineWidth = 60;
@@ -54,6 +59,7 @@ export function SequenceEditor({
   sequence,
   circular,
   features,
+  primers,
   motif,
   canUndo,
   canRedo,
@@ -63,8 +69,7 @@ export function SequenceEditor({
   onRedo,
   onTopologyChange,
   onMotifChange,
-  onAnnotateSelection,
-  onEditAnnotation,
+  onSaveAnnotation,
   onRemoveAnnotation,
 }: Props) {
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -82,7 +87,63 @@ export function SequenceEditor({
   const [caret, setCaret] = useState(1);
   const [directInputAction, setDirectInputAction] = useState<DirectInputAction | null>(null);
   const [directInput, setDirectInput] = useState("");
-  const rows = useMemo(() => buildAnnotatedSequenceRows(sequence, features, lineWidth), [sequence, features]);
+  const [showFeatures, setShowFeatures] = useState(true);
+  const [showPrimers, setShowPrimers] = useState(true);
+  const [showRestrictionSites, setShowRestrictionSites] = useState(false);
+  const [showOrfs, setShowOrfs] = useState(false);
+  const [showComplement, setShowComplement] = useState(true);
+  const [restrictionMode, setRestrictionMode] = useState<RestrictionMode>("unique");
+  const [annotationDraft, setAnnotationDraft] = useState<AnnotationDraft | null>(null);
+  const primerOverlays = useMemo<SequenceOverlay[]>(() => primers.flatMap((primer, primerIndex) => {
+    try {
+      return findPrimerBindings(sequence, primer.sequence, circular).map((binding, bindingIndex) => ({
+        id: `primer-${primerIndex}-${bindingIndex}`,
+        kind: "primer" as const,
+        name: `${primer.name} ${binding.strand}`,
+        color: primer.color ?? "#7655b5",
+        strand: binding.strand,
+        start: binding.start,
+        end: binding.end,
+      }));
+    } catch {
+      return [];
+    }
+  }), [primers, sequence, circular]);
+  const restrictionSites = useMemo(() => findRestrictionSites(sequence, RESTRICTION_ENZYMES, circular), [sequence, circular]);
+  const restrictionSiteCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    restrictionSites.forEach((site) => counts.set(site.enzyme.name, (counts.get(site.enzyme.name) ?? 0) + 1));
+    return counts;
+  }, [restrictionSites]);
+  const visibleRestrictionSites = useMemo(() => restrictionSites.filter((site) => {
+    const count = restrictionSiteCounts.get(site.enzyme.name) ?? 0;
+    if (restrictionMode === "all") return true;
+    if (restrictionMode === "unique") return count === 1;
+    return count <= 2;
+  }), [restrictionSites, restrictionSiteCounts, restrictionMode]);
+  const orfs = useMemo(() => findOpenReadingFrames(sequence, { minAminoAcids: 50, circular }), [sequence, circular]);
+  const overlays = useMemo<SequenceOverlay[]>(() => [
+    ...(showPrimers ? primerOverlays : []),
+    ...(showRestrictionSites ? visibleRestrictionSites.map((site) => ({
+      id: `restriction-${site.id}`,
+      kind: "restriction" as const,
+      name: site.enzyme.name,
+      color: "#1b73a6",
+      strand: site.strand,
+      start: site.position,
+      end: site.end,
+    })) : []),
+    ...(showOrfs ? orfs.map((orf) => ({
+      id: `orf-${orf.id}`,
+      kind: "orf" as const,
+      name: `ORF ${orf.frame > 0 ? "+" : ""}${orf.frame} · ${orf.aminoAcidLength} aa`,
+      color: orf.strand === "+" ? "#f0a23a" : "#58a977",
+      strand: orf.strand,
+      start: orf.start,
+      end: orf.end,
+    })) : []),
+  ], [showPrimers, primerOverlays, showRestrictionSites, visibleRestrictionSites, showOrfs, orfs]);
+  const rows = useMemo(() => buildAnnotatedSequenceRows(sequence, showFeatures ? features : [], lineWidth, overlays), [sequence, showFeatures, features, overlays]);
   const motifPositions = useMemo(() => motifBasePositions(sequence, motif), [sequence, motif]);
   const selectedText = selection ? sequence.slice(selection.start - 1, selection.end) : "";
   const selectedFeatures = useMemo(
@@ -112,6 +173,70 @@ export function SequenceEditor({
     setSelection(null);
     setCaret(1);
     onRedo();
+  }
+
+  function reverseComplementDirect() {
+    try {
+      onApply({ kind: "reverse-complement" });
+      setSelection(null);
+      setCaret(1);
+      setStart("1");
+      setEnd("1");
+      flashStatus("Sequence reverse complemented");
+    } catch (caught) {
+      setDirectError(caught instanceof Error ? caught.message : "The sequence could not be reverse complemented.");
+    }
+  }
+
+  function openNewAnnotation() {
+    if (!selection) {
+      setDirectError("Select bases before creating an annotation.");
+      return;
+    }
+    setAnnotationDraft({ featureIndex: null, name: "", type: "misc_feature", color: "#2aa99a", start: String(selection.start), end: String(selection.end) });
+    setDirectError("");
+  }
+
+  function openAnnotationEditor(featureIndex: number) {
+    const feature = features[featureIndex];
+    if (!feature) return;
+    const segment = feature.segments.find(({ start: segmentStart, end: segmentEnd }) => segmentStart !== null && segmentEnd !== null);
+    const range = feature.range?.match(/(\d+)\s*-\s*(\d+)/);
+    setAnnotationDraft({
+      featureIndex,
+      name: feature.name,
+      type: feature.type,
+      color: feature.color ?? "#2aa99a",
+      start: String(segment?.start ?? (Number(range?.[1]) || 1)),
+      end: String(segment?.end ?? (Number(range?.[2]) || sequence.length)),
+    });
+    setDirectError("");
+  }
+
+  function submitAnnotationDraft(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!annotationDraft) return;
+    const name = annotationDraft.name.trim();
+    const startCoordinate = Number(annotationDraft.start);
+    const endCoordinate = Number(annotationDraft.end);
+    if (!name) {
+      setDirectError("Give the annotation a name.");
+      return;
+    }
+    if (!Number.isInteger(startCoordinate) || !Number.isInteger(endCoordinate) || startCoordinate < 1 || endCoordinate < startCoordinate || endCoordinate > sequence.length) {
+      setDirectError(`Use an annotation range between 1 and ${numberFormatter.format(sequence.length)}.`);
+      return;
+    }
+    onSaveAnnotation(annotationDraft.featureIndex, {
+      name,
+      type: annotationDraft.type.trim() || "misc_feature",
+      color: annotationDraft.color,
+      start: startCoordinate,
+      end: endCoordinate,
+    });
+    selectRange(startCoordinate, endCoordinate);
+    setAnnotationDraft(null);
+    flashStatus(annotationDraft.featureIndex === null ? "Annotation added" : "Annotation updated");
   }
 
   function selectRange(first: number, last: number) {
@@ -340,12 +465,23 @@ export function SequenceEditor({
             <button type="button" onClick={() => { setDirectInputAction("replace"); setDirectInput(""); }} disabled={!selection}>Replace</button>
             <button type="button" onClick={deleteSelection} disabled={!selection}>Delete</button>
             <button type="button" onClick={() => selectRange(1, sequence.length)}>Select all</button>
-            <button type="button" className="annotate-selection-button" onClick={() => selection && onAnnotateSelection(selection.start, selection.end)} disabled={!selection}>+ Annotate</button>
+            <button type="button" className="annotate-selection-button" onClick={openNewAnnotation} disabled={!selection}>+ Annotate</button>
+            <button type="button" className="reverse-complement-button" onClick={reverseComplementDirect}>⇄ Reverse complement</button>
           </div>
           <label className="motif-search direct-motif-search">
             <span>Find motif</span>
             <input value={motif} onChange={(event) => onMotifChange(event.target.value.toUpperCase().replace(/[^ACGTRYSWKMBDHVN]/g, ""))} placeholder="e.g. GAATTC" spellCheck={false} />
           </label>
+        </div>
+
+        <div className="sequence-overlay-toolbar" role="toolbar" aria-label="Sequence overlays">
+          <span>SHOW IN SEQUENCE</span>
+          <button type="button" className={showFeatures ? "active features" : "features"} aria-pressed={showFeatures} onClick={() => setShowFeatures((current) => !current)}><i />Features <b>{features.length}</b></button>
+          <button type="button" className={showPrimers ? "active primers" : "primers"} aria-pressed={showPrimers} onClick={() => setShowPrimers((current) => !current)}><i />Primers <b>{primerOverlays.length}</b></button>
+          <button type="button" className={showRestrictionSites ? "active restrictions" : "restrictions"} aria-pressed={showRestrictionSites} onClick={() => setShowRestrictionSites((current) => !current)}><i />Restriction sites <b>{visibleRestrictionSites.length}</b></button>
+          <button type="button" className={showOrfs ? "active orfs" : "orfs"} aria-pressed={showOrfs} onClick={() => setShowOrfs((current) => !current)}><i />ORFs <b>{orfs.length}</b></button>
+          <button type="button" className={showComplement ? "active complement" : "complement"} aria-pressed={showComplement} onClick={() => setShowComplement((current) => !current)}><i />Complement</button>
+          {showRestrictionSites && <label><span>Enzymes</span><select value={restrictionMode} onChange={(event) => setRestrictionMode(event.target.value as RestrictionMode)}><option value="unique">Unique cutters</option><option value="double">1–2 cutters</option><option value="all">All sites</option></select></label>}
         </div>
 
         <div className="selection-inspector" aria-live="polite">
@@ -358,7 +494,7 @@ export function SequenceEditor({
           <div className="selection-feature-chips">
             {selectedFeatures.slice(0, 5).map((feature, index) => {
               const featureIndex = features.indexOf(feature);
-              return <span key={`${feature.name}-${index}`} style={{ borderColor: feature.color ?? "#17b6c9" }}><b>{feature.name}</b><button type="button" onClick={() => onEditAnnotation(featureIndex)}>Edit</button><button type="button" onClick={() => onRemoveAnnotation(featureIndex)} aria-label={`Remove ${feature.name}`}>×</button></span>;
+              return <span key={`${feature.name}-${index}`} style={{ borderColor: feature.color ?? "#17b6c9" }}><b>{feature.name}</b><button type="button" onClick={() => openAnnotationEditor(featureIndex)}>Edit</button><button type="button" onClick={() => onRemoveAnnotation(featureIndex)} aria-label={`Remove ${feature.name}`}>×</button></span>;
             })}
             {selectedFeatures.length > 5 && <span>+{selectedFeatures.length - 5}</span>}
           </div>
@@ -370,6 +506,18 @@ export function SequenceEditor({
             <label><span>{directInputAction === "replace" ? `Replace ${selection ? `${selection.start}–${selection.end}` : "selection"} with` : directInputAction === "insert" ? `Insert before ${caret}` : selection ? `Paste over ${selection.start}–${selection.end}` : `Paste before ${caret}`}</span><textarea value={directInput} onChange={(event) => setDirectInput(event.target.value.toUpperCase())} placeholder="ACGT…" spellCheck={false} autoFocus /></label>
             <button className="primary-button compact" type="submit">Apply</button>
             <button className="direct-input-cancel" type="button" onClick={() => { setDirectInputAction(null); setDirectInput(""); setDirectError(""); }}>Cancel</button>
+          </form>
+        )}
+        {annotationDraft && (
+          <form className="inline-annotation-form" onSubmit={submitAnnotationDraft}>
+            <div><span className="inline-form-kicker">{annotationDraft.featureIndex === null ? "NEW ANNOTATION" : "EDIT ANNOTATION"}</span><strong>{annotationDraft.featureIndex === null ? "Describe the selected bases" : "Update this feature without leaving the sequence"}</strong></div>
+            <label className="inline-annotation-name"><span>Name</span><input value={annotationDraft.name} onChange={(event) => setAnnotationDraft({ ...annotationDraft, name: event.target.value })} placeholder="e.g. promoter" autoFocus /></label>
+            <label><span>Start</span><input type="number" min="1" max={sequence.length} value={annotationDraft.start} onChange={(event) => setAnnotationDraft({ ...annotationDraft, start: event.target.value })} /></label>
+            <label><span>End</span><input type="number" min="1" max={sequence.length} value={annotationDraft.end} onChange={(event) => setAnnotationDraft({ ...annotationDraft, end: event.target.value })} /></label>
+            <label><span>Type</span><input value={annotationDraft.type} onChange={(event) => setAnnotationDraft({ ...annotationDraft, type: event.target.value })} /></label>
+            <label className="inline-color-field"><span>Color</span><input type="color" value={annotationDraft.color} onChange={(event) => setAnnotationDraft({ ...annotationDraft, color: event.target.value })} /></label>
+            <button className="primary-button compact" type="submit">{annotationDraft.featureIndex === null ? "Add" : "Update"}</button>
+            <button className="direct-input-cancel" type="button" onClick={() => { setAnnotationDraft(null); setDirectError(""); }}>Cancel</button>
           </form>
         )}
         {directError && <p className="direct-editor-error" role="alert">{directError}</p>}
@@ -385,10 +533,10 @@ export function SequenceEditor({
                     {row.annotations.map((annotation) => (
                       <button
                         type="button"
-                        className={`inline-annotation ${annotation.strand === "+" ? "forward" : annotation.strand === "-" ? "reverse" : ""}`}
+                        className={`inline-annotation ${annotation.kind} ${annotation.strand === "+" ? "forward" : annotation.strand === "-" ? "reverse" : ""}`}
                         key={annotation.id}
-                        style={{ backgroundColor: annotation.color, gridColumn: `${annotation.startOffset + 1} / ${annotation.endOffset + 2}`, gridRow: annotation.lane + 1 }}
-                        title={`${annotation.name} · ${annotation.start}–${annotation.end}`}
+                        style={{ "--overlay-color": annotation.color, backgroundColor: annotation.color, gridColumn: `${annotation.startOffset + 1} / ${annotation.endOffset + 2}`, gridRow: annotation.lane + 1 } as CSSProperties}
+                        title={`${annotation.kind} · ${annotation.name} · ${annotation.start}–${annotation.end}`}
                         onMouseDown={(event) => event.stopPropagation()}
                         onClick={() => selectRange(annotation.start, annotation.end)}
                       >
@@ -401,7 +549,7 @@ export function SequenceEditor({
                   {[...row.sequence].map((base, localIndex) => {
                     const position = row.start + localIndex;
                     const baseAnnotations = row.annotations.filter((annotation) => annotation.start <= position && annotation.end >= position);
-                    const annotationColor = baseAnnotations.at(-1)?.color;
+                    const annotationColor = baseAnnotations.filter(({ kind }) => kind !== "restriction").at(-1)?.color;
                     const selected = Boolean(selection && position >= selection.start && position <= selection.end);
                     const caretBefore = !selection && caret === position;
                     const caretAfter = !selection && caret === sequence.length + 1 && position === sequence.length;
@@ -418,15 +566,15 @@ export function SequenceEditor({
                     );
                   })}
                 </div>
-                <div className="sequence-complement-grid" aria-hidden="true">
+                {showComplement && <div className="sequence-complement-grid" aria-hidden="true">
                   {[...row.sequence].map((base, localIndex) => <span className={localIndex > 0 && localIndex % 10 === 0 ? "group-start" : ""} key={localIndex}>{({ A: "T", T: "A", C: "G", G: "C" } as Record<string, string>)[base] ?? "N"}</span>)}
-                </div>
+                </div>}
               </div>
               <span className="sequence-row-coordinate end">{numberFormatter.format(row.end)}</span>
             </div>
           ))}
         </div>
-        <div className="direct-sequence-footer"><span className="base-legend"><i className="a">A</i><i className="c">C</i><i className="g">G</i><i className="t">T</i></span><span>{numberFormatter.format(sequence.length)} bases · {features.length} annotations</span><span>Feature colors are shown above and behind their bases.</span></div>
+        <div className="direct-sequence-footer"><span className="base-legend"><i className="a">A</i><i className="c">C</i><i className="g">G</i><i className="t">T</i></span><span>{numberFormatter.format(sequence.length)} bases</span><span>{showFeatures ? `${features.length} features` : "features hidden"} · {showPrimers ? `${primerOverlays.length} primer sites` : "primers hidden"} · {showRestrictionSites ? `${visibleRestrictionSites.length} restriction sites` : "restriction sites hidden"}{showOrfs ? ` · ${orfs.length} ORFs` : ""}</span></div>
       </div>
 
       <div className="editor-grid compact-editor-grid">
