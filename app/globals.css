@@ -532,11 +532,13 @@ h1 em { color: var(--blue); font-style: normal; font-weight: 760; }
 .inline-annotation { align-items: center; border: 0; color: var(--ink); display: flex; font-size: 7px; font-weight: 800; justify-content: center; min-width: 0; overflow: hidden; padding: 1px 3px; position: relative; text-align: center; white-space: nowrap; }
 .inline-annotation.primer { border-bottom: 2px solid #7655b5; }
 .inline-annotation.orf { border-bottom: 2px solid var(--coral); }
-.inline-annotation.restriction { background: color-mix(in srgb, var(--overlay-color) 13%, var(--white)) !important; border-bottom: 2px solid var(--overlay-color); color: var(--overlay-color); }
+.inline-annotation.restriction { background: color-mix(in srgb, var(--overlay-color) 13%, var(--white)) !important; border-bottom: 2px solid var(--overlay-color); color: var(--overlay-color); overflow: visible; z-index: 1; }
 .inline-annotation:hover, .inline-annotation:focus { box-shadow: inset 0 0 0 2px var(--ink); outline: 0; z-index: 2; }
 .inline-annotation.forward::after { border-bottom: 4px solid transparent; border-left: 5px solid rgba(7,24,39,.58); border-top: 4px solid transparent; content: ""; margin-left: 4px; }
 .inline-annotation.reverse::before { border-bottom: 4px solid transparent; border-right: 5px solid rgba(7,24,39,.58); border-top: 4px solid transparent; content: ""; margin-right: 4px; }
 .inline-annotation span { overflow: hidden; text-overflow: ellipsis; }
+.inline-annotation.restriction span { background: var(--overlay-color); border-radius: 4px; box-shadow: 0 1px 3px rgba(21,59,90,.24); color: var(--white); font-size: 8px; line-height: 1; min-width: max-content; overflow: visible; padding: 3px 6px; position: relative; text-overflow: clip; z-index: 2; }
+.inline-annotation.restriction span::after { background: var(--overlay-color); content: ""; height: 4px; left: 50%; position: absolute; top: 100%; width: 1px; }
 .sequence-base, .sequence-complement-grid span { align-items: center; display: flex; font-family: monospace; justify-content: center; min-height: 22px; min-width: 0; position: relative; user-select: none; }
 .sequence-base { cursor: text; font-size: 12px; font-weight: 800; }
 .sequence-complement-grid span { color: rgba(7,24,39,.35); font-size: 9px; min-height: 16px; }
