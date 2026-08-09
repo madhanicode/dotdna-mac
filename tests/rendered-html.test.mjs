@@ -18,7 +18,7 @@ test("server-renders the DOTDNA reader", async () => {
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /<title>DOTDNA — Local DNA Workspace<\/title>/i);
-  assert.match(html, /Your DNA sequence/);
+  assert.match(html, /Your plasmids/);
   assert.match(html, /Choose file/);
   assert.match(html, /annotate/);
   assert.match(html, /Processed locally/);

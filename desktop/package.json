@@ -1,0 +1,76 @@
+{
+  "name": "dotdna-mac",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline DOTDNA plasmid and DNA workspace for macOS",
+  "author": "madhanicode",
+  "license": "UNLICENSED",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac dmg --universal",
+    "dist:arm64": "electron-builder --mac dmg --arm64",
+    "dist:x64": "electron-builder --mac dmg --x64"
+  },
+  "devDependencies": {
+    "@electron/notarize": "3.1.1",
+    "electron": "43.3.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.madhanicode.dotdna",
+    "productName": "DOTDNA",
+    "artifactName": "DOTDNA-${version}-${arch}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "../release"
+    },
+    "files": [
+      "main.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../.next/standalone",
+        "to": "standalone",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "icon": "assets/icon-1024.png",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "mergeASARs": false,
+      "x64ArchFiles": "**/app.asar.unpacked/node_modules/**/*",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "DOTDNA ${version}",
+      "backgroundColor": "#f2f7f6",
+      "iconSize": 112,
+      "contents": [
+        {
+          "x": 150,
+          "y": 190
+        },
+        {
+          "x": 410,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "afterSign": "scripts/notarize.cjs"
+  }
+}
