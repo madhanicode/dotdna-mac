@@ -96,7 +96,7 @@ export function SequenceEditor({
   const [annotationDraft, setAnnotationDraft] = useState<AnnotationDraft | null>(null);
   const primerOverlays = useMemo<SequenceOverlay[]>(() => primers.flatMap((primer, primerIndex) => {
     try {
-      return findPrimerBindings(sequence, primer.sequence, circular).map((binding, bindingIndex) => ({
+      return findPrimerBindings(sequence, primer.sequence, circular, { bindingLength: primer.bindingLength }).map((binding, bindingIndex) => ({
         id: `primer-${primerIndex}-${bindingIndex}`,
         kind: "primer" as const,
         name: `${primer.name} ${binding.strand}`,

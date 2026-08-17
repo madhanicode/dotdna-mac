@@ -27,6 +27,8 @@
     },
     "files": [
       "main.cjs",
+      "preload.cjs",
+      "recovery-store.cjs",
       "package.json"
     ],
     "extraResources": [

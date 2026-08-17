@@ -3,11 +3,15 @@
 DOTDNA is a local-first DNA and plasmid workspace. It opens SnapGene, GenBank,
 FASTA, DOTDNA project, and raw DNA files; visualizes maps and annotations; and
 supports sequence editing, ORF and restriction-site analysis, primers, PCR,
-translation, assembly, alignment, and export.
+translation, exact-overlap/restriction/Golden Gate assembly planning, alignment,
+and export.
 
 Sequence data is processed on the device. The standalone Mac app runs its own
 loopback-only web server and does not require the hosted DOTDNA site or an
-internet connection.
+internet connection. The desktop app atomically autosaves the open workspace,
+including sequence edits, annotations, primers, and undo history, inside its
+local application-data directory. On relaunch it restores that workspace; the
+recovery banner and workspace actions can discard the local recovery file.
 
 ## Web development
 

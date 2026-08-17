@@ -52,6 +52,7 @@ test("decodes primers, notes, and end chemistry packets", () => {
   const parsed = parseSnapGene(join(header, dna, primers, notes, properties).buffer);
 
   assert.equal(parsed.primers[0].name, "Fwd");
+  assert.equal(parsed.primers[0].bindingLength, 4);
   assert.equal(parsed.primers[0].bindingSites[0].start, 2);
   assert.equal(parsed.primerSettings.minContinuousMatchLen, "10");
   assert.equal(parsed.notes.createdBy, "DOTDNA");
