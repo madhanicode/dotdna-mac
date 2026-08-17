@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent, FormEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AnalysisPanels } from "./AnalysisPanels";
 import { DesignVerifyTools } from "./DesignVerifyTools";
 import { DocumentInspector } from "./DocumentInspector";
@@ -11,33 +11,41 @@ import type { AssemblyResult } from "./design-tools";
 import { applySequenceEdit, SequenceEdit } from "./sequence-edit";
 import { parseTextSequence, toDotDnaProject, toGenBank } from "./sequence-formats";
 import type { OpenReadingFrame } from "./sequence-analysis";
-import { createSequenceData, parseSnapGene, SnapGeneData, SnapGeneFeature, SnapGenePrimer, toFasta, updateSequenceData } from "./snapgene";
+import { createSequenceData, parseSnapGene, SnapGeneData, SnapGenePrimer, toFasta, updateSequenceData } from "./snapgene";
+import {
+  clearWorkspaceRecovery,
+  createWorkspaceRecovery,
+  loadWorkspaceRecovery,
+  saveWorkspaceRecovery,
+} from "./workspace-recovery";
+import type { RecoveryAnnotation, RecoveryHistoryEntry, RecoverySnapshot } from "./workspace-recovery";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 
-type DisplayAnnotation = SnapGeneFeature & {
-  id: string;
-  isCustom: boolean;
-};
+type DisplayAnnotation = RecoveryAnnotation;
+type HistoryEntry = RecoveryHistoryEntry;
+type WorkspaceSnapshot = RecoverySnapshot;
 
-type HistoryEntry = {
-  description: string;
-  timestamp: string;
-};
-
-type WorkspaceSnapshot = {
-  data: SnapGeneData;
-  customAnnotations: DisplayAnnotation[];
-  history: HistoryEntry[];
-};
+type RecoveryStatus = "loading" | "idle" | "restored" | "saving" | "saved" | "error";
 
 function coordinates(range: string | null) {
   const match = range?.match(/(\d+)\s*-\s*(\d+)/);
   return match ? { start: Number(match[1]), end: Number(match[2]) } : null;
 }
 
+function localSaveTime(value: string | null) {
+  if (!value) return null;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const autosaveEnabledRef = useRef(false);
+  const saveGenerationRef = useRef(0);
+  const workspaceRevisionRef = useRef(0);
   const [data, setData] = useState<SnapGeneData | null>(null);
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
@@ -61,6 +69,65 @@ export default function Home() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [undoStack, setUndoStack] = useState<WorkspaceSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<WorkspaceSnapshot[]>([]);
+  const [recoveryReady, setRecoveryReady] = useState(false);
+  const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus>("loading");
+  const [recoveredAt, setRecoveredAt] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const startingRevision = workspaceRevisionRef.current;
+    void loadWorkspaceRecovery().then((record) => {
+      if (!active || workspaceRevisionRef.current !== startingRevision) return;
+      if (record) {
+        const workspace = record.workspace;
+        setData(workspace.data);
+        setFileName(workspace.fileName);
+        setImportFormat(workspace.importFormat);
+        setMotif(workspace.motif);
+        setCustomAnnotations(workspace.customAnnotations);
+        setHistory(workspace.history);
+        setUndoStack(workspace.undoStack);
+        setRedoStack(workspace.redoStack);
+        setRecoveredAt(record.savedAt);
+        setLastSavedAt(record.savedAt);
+        setRecoveryStatus("restored");
+      } else {
+        setRecoveryStatus("idle");
+      }
+      autosaveEnabledRef.current = true;
+      setRecoveryReady(true);
+    }).catch(() => {
+      if (!active) return;
+      autosaveEnabledRef.current = true;
+      setRecoveryReady(true);
+      setRecoveryStatus("error");
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!recoveryReady || !autosaveEnabledRef.current || !data || !fileName) return;
+    const generation = ++saveGenerationRef.current;
+    const record = createWorkspaceRecovery({
+      data,
+      fileName,
+      importFormat,
+      motif,
+      customAnnotations,
+      history,
+      undoStack,
+      redoStack,
+    });
+    setRecoveryStatus("saving");
+    void saveWorkspaceRecovery(record).then(() => {
+      if (saveGenerationRef.current !== generation) return;
+      setLastSavedAt(record.savedAt);
+      setRecoveryStatus("saved");
+    }).catch(() => {
+      if (saveGenerationRef.current === generation) setRecoveryStatus("error");
+    });
+  }, [recoveryReady, data, fileName, importFormat, motif, customAnnotations, history, undoStack, redoStack]);
 
   const annotations = useMemo<DisplayAnnotation[]>(
     () => [
@@ -75,6 +142,8 @@ export default function Home() {
   );
 
   function loadWorkspace(nextData: SnapGeneData, nextName: string, format: string) {
+    workspaceRevisionRef.current += 1;
+    autosaveEnabledRef.current = true;
     setData(nextData);
     setFileName(nextName);
     setImportFormat(format);
@@ -88,6 +157,32 @@ export default function Home() {
     setRedoStack([]);
     setShowPasteImport(false);
     setPastedSequence("");
+    setRecoveredAt(null);
+  }
+
+  async function discardRecoveryData() {
+    const confirmed = window.confirm("Discard this project and delete its on-device recovery data? Exported files will not be affected.");
+    if (!confirmed) return;
+    workspaceRevisionRef.current += 1;
+    autosaveEnabledRef.current = false;
+    saveGenerationRef.current += 1;
+    try {
+      await clearWorkspaceRecovery();
+      setData(null);
+      setFileName("");
+      setError("");
+      setMotif("");
+      setCustomAnnotations([]);
+      setHistory([]);
+      setUndoStack([]);
+      setRedoStack([]);
+      setRecoveredAt(null);
+      setLastSavedAt(null);
+      setRecoveryStatus("idle");
+    } catch {
+      autosaveEnabledRef.current = true;
+      setRecoveryStatus("error");
+    }
   }
 
   function currentSnapshot(): WorkspaceSnapshot | null {
@@ -173,7 +268,7 @@ export default function Home() {
 
   function openAssemblyProduct(result: AssemblyResult, name: string) {
     const safeName = `${name.trim() || "assembly"}.dna`;
-    loadWorkspace(createSequenceData(result.sequence, { circular: result.circular }), safeName, "DOTDNA Assembly");
+    loadWorkspace(createSequenceData(result.sequence, { circular: result.circular, features: result.features }), safeName, "DOTDNA Assembly");
     window.setTimeout(() => document.querySelector("#map")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   }
 
@@ -353,7 +448,7 @@ export default function Home() {
           </span>
           DOTDNA
         </a>
-        <span className="privacy-note"><span />Runs in your browser</span>
+        <span className="privacy-note"><span />Stays on your device</span>
       </header>
 
       <section className="hero" id="top">
@@ -426,10 +521,30 @@ export default function Home() {
             <a href="#sequence">Sequence</a>
             <a href="#file-details">File details</a>
           </nav>
+          {recoveredAt && (
+            <div className="recovery-banner" role="status">
+              <span className="recovery-banner-mark" aria-hidden="true">↻</span>
+              <div>
+                <strong>Recovered your last workspace</strong>
+                <p>{fileName} and its edits were restored from {localSaveTime(recoveredAt)}.</p>
+              </div>
+              <button type="button" onClick={() => void discardRecoveryData()}>Discard recovery data</button>
+            </div>
+          )}
           <div className="result-heading">
             <div>
               <p className="eyebrow cyan">{importFormat} workspace</p>
               <h2>{fileName}</h2>
+              <p className={`autosave-status ${recoveryStatus === "error" ? "error" : ""}`} role={recoveryStatus === "error" ? "alert" : "status"}>
+                <span aria-hidden="true" />
+                {recoveryStatus === "saving"
+                  ? "Saving on this device…"
+                  : recoveryStatus === "error"
+                    ? "On-device autosave is unavailable"
+                    : lastSavedAt
+                      ? `Saved on this device · ${localSaveTime(lastSavedAt)}`
+                      : "On-device autosave ready"}
+              </p>
             </div>
             <div className="result-actions">
               <button type="button" className="secondary-button" onClick={copySequence}>
@@ -439,7 +554,7 @@ export default function Home() {
                 <summary className="primary-button compact">Export <span aria-hidden="true">↓</span></summary>
                 <div><button type="button" onClick={downloadFasta}>FASTA sequence</button><button type="button" onClick={downloadGenBank}>GenBank + annotations</button><button type="button" onClick={downloadProject}>DOTDNA project</button></div>
               </details>
-              <button type="button" className="new-file-button" onClick={() => { setData(null); setFileName(""); setError(""); setHistory([]); setUndoStack([]); setRedoStack([]); }}>New</button>
+              <button type="button" className="new-file-button" onClick={() => void discardRecoveryData()}>Discard autosave</button>
             </div>
           </div>
 
@@ -499,14 +614,14 @@ export default function Home() {
             ) : (
               <p className="empty-features map-empty">No annotations yet. Add the first one above.</p>
             )}
-            <p className="session-note">Edits are non-destructive. Export a DOTDNA project or GenBank file when you want to keep them.</p>
+            <p className="session-note">Changes are autosaved on this device. Export a DOTDNA project or GenBank file for a portable copy.</p>
           </section>
 
           <AnalysisPanels key={fileName} sequence={data.sequence} circular={data.circular} onCreateCds={createCdsFromOrf} />
 
           <MolecularTools key={`${fileName}-molecular`} fileName={fileName} sequence={data.sequence} circular={data.circular} primers={data.primers} onPrimersChange={changePrimers} />
 
-          <DesignVerifyTools key={`${fileName}-design`} fileName={fileName} sequence={data.sequence} onOpenProduct={openAssemblyProduct} />
+          <DesignVerifyTools key={`${fileName}-design`} fileName={fileName} sequence={data.sequence} circular={data.circular} features={annotations} onOpenProduct={openAssemblyProduct} />
 
           <SequenceEditor sequence={data.sequence} circular={data.circular} features={annotations} primers={data.primers} motif={motif} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} onMotifChange={setMotif} onSaveAnnotation={saveInlineAnnotation} onRemoveAnnotation={(featureIndex) => removeAnnotation(annotations[featureIndex])} />
 

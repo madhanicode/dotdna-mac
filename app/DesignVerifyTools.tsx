@@ -5,19 +5,26 @@ import {
   alignDnaGlobal,
   AssemblyResult,
   assembleByExactOverlap,
+  CloningEnd,
   formatPairwiseAlignment,
   PairwiseAlignment,
   parseAssemblyFragments,
+  planGoldenGateAssembly,
+  planRestrictionCloning,
 } from "./design-tools";
-import { toFasta } from "./snapgene";
+import { RESTRICTION_ENZYMES } from "./sequence-analysis";
+import { SnapGeneFeature, toFasta } from "./snapgene";
 
 type Props = {
   fileName: string;
   sequence: string;
+  circular: boolean;
+  features: SnapGeneFeature[];
   onOpenProduct: (result: AssemblyResult, name: string) => void;
 };
 
 type DesignTab = "assembly" | "alignment";
+type AssemblyMethod = "overlap" | "restriction" | "golden-gate";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 
@@ -31,13 +38,23 @@ function download(name: string, contents: string) {
   URL.revokeObjectURL(url);
 }
 
-export function DesignVerifyTools({ fileName, sequence, onOpenProduct }: Props) {
+function endLabel(end?: CloningEnd) {
+  if (!end) return "uncharacterized end";
+  return end.polarity === "blunt" ? `${end.enzyme} blunt` : `${end.enzyme} ${end.polarity} ${end.overhang}`;
+}
+
+export function DesignVerifyTools({ fileName, sequence, circular, features, onOpenProduct }: Props) {
   const stem = fileName.replace(/\.[^.]+$/, "") || "sequence";
   const [tab, setTab] = useState<DesignTab>("assembly");
+  const [assemblyMethod, setAssemblyMethod] = useState<AssemblyMethod>("overlap");
   const [assemblyName, setAssemblyName] = useState(`${stem}_assembly`);
   const [assemblyInput, setAssemblyInput] = useState("");
   const [minimumOverlap, setMinimumOverlap] = useState("20");
   const [circularProduct, setCircularProduct] = useState(false);
+  const [leftEnzyme, setLeftEnzyme] = useState("EcoRI");
+  const [rightEnzyme, setRightEnzyme] = useState("HindIII");
+  const [goldenGateEnzyme, setGoldenGateEnzyme] = useState("BsaI");
+  const [firstIsVector, setFirstIsVector] = useState(true);
   const [assemblyResult, setAssemblyResult] = useState<AssemblyResult | null>(null);
   const [assemblyError, setAssemblyError] = useState("");
   const [referenceStart, setReferenceStart] = useState("1");
@@ -50,11 +67,28 @@ export function DesignVerifyTools({ fileName, sequence, onOpenProduct }: Props) 
     event.preventDefault();
     setAssemblyError("");
     try {
-      const fragments = parseAssemblyFragments(assemblyInput);
-      setAssemblyResult(assembleByExactOverlap(fragments, {
-        minimumOverlap: Number(minimumOverlap),
-        circular: circularProduct,
-      }));
+      const fragments = parseAssemblyFragments(assemblyInput).map((fragment) => fragment.sequence === sequence
+        ? { ...fragment, features, circular }
+        : fragment);
+      if (assemblyMethod === "overlap") {
+        setAssemblyResult(assembleByExactOverlap(fragments, {
+          minimumOverlap: Number(minimumOverlap),
+          circular: circularProduct,
+        }));
+      } else if (assemblyMethod === "restriction") {
+        setAssemblyResult(planRestrictionCloning(fragments.map((fragment, index) => ({
+          ...fragment,
+          circular: index === 0 && firstIsVector,
+          leftEnzyme,
+          rightEnzyme,
+          retain: index === 0 && firstIsVector ? "outside" as const : "between" as const,
+        })), { circular: circularProduct }));
+      } else {
+        setAssemblyResult(planGoldenGateAssembly(fragments, {
+          enzyme: goldenGateEnzyme,
+          circular: circularProduct,
+        }));
+      }
     } catch (caught) {
       setAssemblyResult(null);
       setAssemblyError(caught instanceof Error ? caught.message : "The fragments could not be assembled.");
@@ -64,6 +98,13 @@ export function DesignVerifyTools({ fileName, sequence, onOpenProduct }: Props) 
   function useCurrentAsFragment() {
     setAssemblyInput((current) => `${current.trim()}${current.trim() ? "\n" : ""}>${stem}\n${sequence}\n>fragment_2\n`);
     setAssemblyResult(null);
+  }
+
+  function changeAssemblyMethod(method: AssemblyMethod) {
+    setAssemblyMethod(method);
+    setAssemblyResult(null);
+    setAssemblyError("");
+    setCircularProduct(method !== "overlap");
   }
 
   function runAlignment(event: FormEvent<HTMLFormElement>) {
@@ -102,32 +143,57 @@ export function DesignVerifyTools({ fileName, sequence, onOpenProduct }: Props) 
       {tab === "assembly" && (
         <div className="assembly-workspace" role="tabpanel">
           <form className="assembly-form" onSubmit={runAssembly}>
-            <span className="tool-panel-label">EXACT-OVERLAP ASSEMBLY</span>
+            <span className="tool-panel-label">ASSEMBLY PLANNER</span>
             <label><span>Product name</span><input value={assemblyName} onChange={(event) => setAssemblyName(event.target.value)} /></label>
+            <label>
+              <span>Method</span>
+              <select value={assemblyMethod} onChange={(event) => changeAssemblyMethod(event.target.value as AssemblyMethod)}>
+                <option value="overlap">Exact-overlap assembly</option>
+                <option value="restriction">Restriction cloning</option>
+                <option value="golden-gate">Golden Gate</option>
+              </select>
+            </label>
             <label><span>Fragments in assembly order</span><textarea value={assemblyInput} onChange={(event) => setAssemblyInput(event.target.value.toUpperCase())} placeholder={">vector\n…DNA ending in overlap…\n>insert\n…same overlap followed by insert…"} spellCheck={false} /></label>
             <button type="button" className="inline-tool-button" onClick={useCurrentAsFragment}>+ Use current sequence as a fragment</button>
-            <div className="assembly-option-row">
+            {assemblyMethod === "overlap" && (
               <label><span>Minimum overlap</span><div className="unit-input dark-unit"><input type="number" min="1" max="200" value={minimumOverlap} onChange={(event) => setMinimumOverlap(event.target.value)} /><b>bp</b></div></label>
-              <label className="assembly-check"><input type="checkbox" checked={circularProduct} onChange={(event) => setCircularProduct(event.target.checked)} /><span>Circular product</span></label>
-            </div>
-            <p>Fragments are joined in order. DOTDNA also tests the reverse complement of each downstream fragment.</p>
+            )}
+            {assemblyMethod === "restriction" && (
+              <>
+                <div className="assembly-option-row">
+                  <label><span>Left enzyme</span><select value={leftEnzyme} onChange={(event) => setLeftEnzyme(event.target.value)}>{RESTRICTION_ENZYMES.map(({ name }) => <option key={name}>{name}</option>)}</select></label>
+                  <label><span>Right enzyme</span><select value={rightEnzyme} onChange={(event) => setRightEnzyme(event.target.value)}>{RESTRICTION_ENZYMES.map(({ name }) => <option key={name}>{name}</option>)}</select></label>
+                </div>
+                <label className="assembly-check"><input type="checkbox" checked={firstIsVector} onChange={(event) => setFirstIsVector(event.target.checked)} /><span>First fragment is a circular vector; retain its backbone outside the two sites</span></label>
+              </>
+            )}
+            {assemblyMethod === "golden-gate" && (
+              <label><span>Type IIS enzyme</span><select value={goldenGateEnzyme} onChange={(event) => setGoldenGateEnzyme(event.target.value)}>{RESTRICTION_ENZYMES.filter(({ kind }) => kind === "Type IIS").map(({ name, recognition }) => <option key={name} value={name}>{name} · {recognition}</option>)}</select></label>
+            )}
+            <label className="assembly-check"><input type="checkbox" checked={circularProduct} onChange={(event) => setCircularProduct(event.target.checked)} /><span>Circular product</span></label>
+            <p>{assemblyMethod === "overlap"
+              ? "Fragments are joined in order; each downstream fragment is also tested in reverse-complement orientation."
+              : assemblyMethod === "restriction"
+                ? "The enzyme sites define each retained fragment. DOTDNA checks sticky/blunt end chemistry at every junction and can reorient inserts."
+                : "Each part needs an inward-facing Type IIS site at both ends. DOTDNA removes those sites, checks every overhang, and flags internal sites or ambiguous junctions."}</p>
             {assemblyError && <p className="tool-error" role="alert">{assemblyError}</p>}
-            <button className="primary-button compact" type="submit">Preview assembly <span aria-hidden="true">↗</span></button>
+            <button className="primary-button compact" type="submit">Plan assembly <span aria-hidden="true">↗</span></button>
           </form>
 
           <div className="assembly-result">
             {assemblyResult ? (
               <>
-                <div className="design-result-heading"><div><span className="tool-panel-label">ASSEMBLED PRODUCT</span><h4>{assemblyName || "Assembly product"}</h4></div><span className="topology-badge">{assemblyResult.circular ? "Circular" : "Linear"}</span></div>
-                <div className="assembly-stat-row"><span><strong>{numberFormatter.format(assemblyResult.sequence.length)}</strong> bp</span><span><strong>{assemblyResult.fragments.length}</strong> fragments</span><span><strong>{assemblyResult.junctions.length}</strong> junctions</span></div>
+                <div className="design-result-heading"><div><span className="tool-panel-label">{assemblyResult.valid ? "ASSEMBLED PRODUCT" : "PLAN NEEDS CHANGES"}</span><h4>{assemblyName || "Assembly product"}</h4></div><span className={`topology-badge ${assemblyResult.valid ? "" : "invalid"}`}>{assemblyResult.valid ? (assemblyResult.circular ? "Circular" : "Linear") : "Blocked"}</span></div>
+                <div className="assembly-stat-row"><span><strong>{numberFormatter.format(assemblyResult.sequence.length)}</strong> bp</span><span><strong>{assemblyResult.fragments.length}</strong> fragments</span><span><strong>{assemblyResult.junctions.length}</strong> junctions</span><span><strong>{assemblyResult.features.length}</strong> features</span></div>
                 <ol className="junction-list">
-                  {assemblyResult.junctions.map((junction, index) => <li key={`${junction.left}-${junction.right}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{junction.left} → {junction.right}</strong><small>{junction.overlap} bp exact overlap{junction.reverseComplemented ? " · right fragment reverse-complemented" : ""}{junction.closure ? " · circular closure" : ""}</small></div></li>)}
+                  {assemblyResult.junctions.map((junction, index) => <li className={junction.compatible === false ? "invalid" : ""} key={`${junction.left}-${junction.right}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{junction.left} → {junction.right}</strong><small>{junction.leftEnd && junction.rightEnd ? `${endLabel(junction.leftEnd)} ↔ ${endLabel(junction.rightEnd)} · ${junction.compatible ? "compatible" : "incompatible"}` : `${junction.overlap} bp exact overlap`}{junction.reverseComplemented ? " · right fragment reverse-complemented" : ""}{junction.closure ? " · circular closure" : ""}</small></div></li>)}
                 </ol>
+                {assemblyResult.warnings.length > 0 && <ul className="assembly-warning-list" aria-label="Assembly warnings">{assemblyResult.warnings.map((warning, index) => <li className={warning.severity} key={`${warning.code}-${index}`}><strong>{warning.severity === "error" ? "Fix required" : "Check design"}</strong><span>{warning.message}</span></li>)}</ul>}
                 <code className="assembly-preview">{assemblyResult.sequence.slice(0, 180)}{assemblyResult.sequence.length > 180 ? "…" : ""}</code>
-                <div className="assembly-actions"><button type="button" className="secondary-button" onClick={() => download(`${assemblyName || "assembly"}.fasta`, toFasta(assemblyName || "assembly", assemblyResult.sequence))}>Download FASTA</button><button type="button" className="primary-button compact" onClick={() => onOpenProduct(assemblyResult, assemblyName || "assembly")}>Open as workspace</button></div>
-                <p className="method-note">Exact-overlap planning only. This preview does not model overlap melting temperatures, secondary structure, synthesis errors, or reaction efficiency.</p>
+                <div className="assembly-actions"><button type="button" className="secondary-button" disabled={!assemblyResult.valid} onClick={() => download(`${assemblyName || "assembly"}.fasta`, toFasta(assemblyName || "assembly", assemblyResult.sequence))}>Download FASTA</button><button type="button" className="primary-button compact" disabled={!assemblyResult.valid} onClick={() => onOpenProduct(assemblyResult, assemblyName || "assembly")}>Open as workspace</button></div>
+                <p className="method-note">Sequence and feature coordinates reflect the planned product. Confirm reaction conditions and enzyme-specific guidance before running the experiment.</p>
               </>
-            ) : <div className="tool-empty"><span>↔</span><p>Paste two to twelve FASTA fragments in the order you want them joined. Every junction must contain the requested exact suffix-to-prefix overlap.</p></div>}
+            ) : <div className="tool-empty"><span>↔</span><p>Paste two to twelve FASTA fragments in product order, choose an assembly method and enzymes, then plan the junctions.</p></div>}
           </div>
         </div>
       )}
