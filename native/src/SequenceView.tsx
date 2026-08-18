@@ -6,6 +6,7 @@ type Props = {
   monochrome: boolean;
   disabled?: boolean;
   onApply: (sequence: string) => Promise<void>;
+  onDraftStateChange?: (dirty: boolean) => void;
 };
 
 const rowHeight = 46;
@@ -19,7 +20,7 @@ function Bases({ value, monochrome }: { value: string; monochrome: boolean }) {
   );
 }
 
-export function SequenceView({ sequence, monochrome, disabled = false, onApply }: Props) {
+export function SequenceView({ sequence, monochrome, disabled = false, onApply, onDraftStateChange }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(580);
@@ -27,6 +28,8 @@ export function SequenceView({ sequence, monochrome, disabled = false, onApply }
   const [draft, setDraft] = useState(sequence);
   const [editError, setEditError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
+  const draftStateCallbackRef = useRef(onDraftStateChange);
+  draftStateCallbackRef.current = onDraftStateChange;
   const totalRows = Math.ceil(sequence.length / lineLength);
   const range = visibleRowRange(scrollTop, viewportHeight, totalRows, rowHeight);
   const rows = useMemo(
@@ -46,6 +49,19 @@ export function SequenceView({ sequence, monochrome, disabled = false, onApply }
   useEffect(() => {
     if (!editing) setDraft(sequence);
   }, [editing, sequence]);
+
+  useEffect(() => {
+    draftStateCallbackRef.current?.(editing && draft !== sequence);
+  }, [draft, editing, sequence]);
+
+  useEffect(() => () => draftStateCallbackRef.current?.(false), []);
+
+  function cancelEdit() {
+    if (draft !== sequence && !window.confirm("Discard this unapplied sequence draft?")) return;
+    setDraft(sequence);
+    setEditError(null);
+    setEditing(false);
+  }
 
   async function applyEdit() {
     const normalized = draft.replace(/[\s\d]/g, "").toUpperCase().replaceAll("U", "T");
@@ -81,7 +97,7 @@ export function SequenceView({ sequence, monochrome, disabled = false, onApply }
       {editing ? <div className="sequence-edit-pane">
         <header><strong>Direct sequence edit</strong><span>Coordinates after the changed interval will shift; overlapping annotations will resize.</span></header>
         <textarea autoFocus spellCheck={false} value={draft} onChange={(event) => setDraft(event.target.value)} aria-label="Editable DNA sequence" />
-        <footer><span className="mono">{draft.replace(/[\s\d]/g, "").length.toLocaleString()} bases</span>{editError && <strong>{editError}</strong>}<button disabled={applying} onClick={() => setEditing(false)}>Cancel</button><button className="primary-button" disabled={disabled || applying || draft === sequence} onClick={() => void applyEdit()}>{applying ? "Applying…" : "Apply Edit"}</button></footer>
+        <footer><span className="mono">{draft.replace(/[\s\d]/g, "").length.toLocaleString()} bases</span>{editError && <strong>{editError}</strong>}<button disabled={applying} onClick={cancelEdit}>Cancel</button><button className="primary-button" disabled={disabled || applying || draft === sequence} onClick={() => void applyEdit()}>{applying ? "Applying…" : "Apply Edit"}</button></footer>
       </div> : <div
         className="sequence-scroll"
         ref={scrollRef}

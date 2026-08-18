@@ -76,6 +76,7 @@ export type SequenceDocument = {
 export type DocumentSummary = {
   path: string | null;
   format: string;
+  fileVersion: string | null;
   document: SequenceDocument;
   length: number;
   gcPercent: number;

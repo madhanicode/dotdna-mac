@@ -38,6 +38,7 @@ const reverseBinding = sequence.slice(3390, 3413);
 export const demoDocument: DocumentSummary = {
   path: null,
   format: "DOTDNA Demo",
+  fileVersion: null,
   length: sequence.length,
   gcPercent,
   unknownBases: 0,

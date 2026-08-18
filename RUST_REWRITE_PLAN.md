@@ -5,7 +5,8 @@
 The installed `0.1.0` milestone completes the native foundation, Rust document
 and file-format engine, coordinate-safe sequence editing, actionable primer
 validation, nearest-neighbor scoring, standard/inverse/overlap-extension PCR,
-deterministic products, atomic project save, bounded undo/redo, and the initial
+deterministic products, conflict-aware New/Open/Save/Save As workflows, bounded
+undo/redo, native macOS menus, and the initial
 Map/Sequence/Features/Primers/History workbench. Controls for folder projects,
 feature and primer authoring, digest, assembly, alignment, translation, split
 views, and crash recovery remain visibly disabled and are later parity phases;

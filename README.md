@@ -9,8 +9,10 @@ files; visualizes maps, features, primers, history, and restriction sites; edits
 sequences while remapping annotation coordinates; and simulates standard,
 inverse, and overlap-extension PCR. Primer tails and intentional mismatches are
 included in products while only the explicit 3′ binding region is validated and
-thermodynamically scored. Controls that are not implemented yet are visibly
-disabled rather than showing synthetic scientific results.
+thermodynamically scored. It also creates new DNA documents and provides native
+New, Open, Save, and Save As workflows with unsaved-change protection and
+conflict-aware atomic project writes. Controls that are not implemented yet are
+visibly disabled rather than showing synthetic scientific results.
 
 Sequence data is processed entirely on the device. The Tauri application does
 not start a local server and does not require the hosted DOTDNA site.

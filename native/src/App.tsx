@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { demoDocument } from "./demo";
+import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nextUntitledName } from "./document-workflows";
 import { findRestrictionSites, type RestrictionSite } from "./restriction-sites";
 import { SequenceView } from "./SequenceView";
-import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, PcrCommandResult, PrimerCheck } from "./types";
+import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, PcrCommandResult, PrimerCheck, SequenceDocument } from "./types";
 
 const PlasmidMap = lazy(() => import("./PlasmidMap").then((module) => ({ default: module.PlasmidMap })));
 
@@ -22,6 +24,8 @@ type BottomView = typeof bottomViews[number];
 type Workflow = "PCR" | "Inverse PCR" | "Overlap-Extension PCR" | null;
 type Diagnostic = { level: "warn" | "error"; title: string; body: string };
 type EditHistory = { undo: OpenDocument[]; redo: OpenDocument[] };
+type CloseRequest = { kind: "document"; id: string } | { kind: "quit" };
+type SavePathResolution = { path: string; fileVersion: string | null };
 
 const MAX_EDIT_HISTORY_ENTRIES = 32;
 const MAX_EDIT_HISTORY_BASES = 2_000_000;
@@ -52,8 +56,10 @@ function Icon({ name }: { name: string }) {
   const drawing = (() => {
     switch (name) {
       case "sidebar": return <><rect x="2.5" y="3.5" width="15" height="13" rx="1.5" /><path d="M7.5 4v12M4.5 7h1M4.5 10h1" /></>;
+      case "new": return <><path d="M4 2.5h8l4 4v11H4z" /><path d="M12 2.5v4h4M10 9v6M7 12h6" /></>;
       case "open": return <><path d="M2.5 6.5h6l1.5 2h7.5l-2 7H4z" /><path d="M3.5 6.5V4.5h5l1.5 2" /></>;
       case "save": return <><path d="M3.5 3.5h11l2 2v11h-13z" /><path d="M6 3.5v5h7v-5M6.5 16.5v-5h7v5" /></>;
+      case "saveAs": return <><path d="M3.5 3.5h9l2 2v7" /><path d="M6 3.5v5h6v-5M6.5 16.5v-5h5" /><path d="m12 15 4-4 1.5 1.5-4 4-2 .5z" /></>;
       case "undo": return <><path d="M7 5 3 9l4 4" /><path d="M3.5 9H11a5 5 0 0 1 5 5" /></>;
       case "redo": return <><path d="m13 5 4 4-4 4" /><path d="M16.5 9H9a5 5 0 0 0-5 5" /></>;
       case "annotate": return <><path d="M3 5.5h9l5 4.5-5 4.5H3z" /><circle cx="6" cy="10" r="1" /></>;
@@ -78,13 +84,13 @@ function ToolButton({ icon, label, disabled, onClick, active }: { icon: string; 
   );
 }
 
-function EmptyWorkspace({ onOpen }: { onOpen: () => void }) {
+function EmptyWorkspace({ onNew, onOpen }: { onNew: () => void; onOpen: () => void }) {
   return (
     <div className="empty-workspace">
       <div className="empty-mark"><span /><span /><span /></div>
       <h2>Open a DNA document</h2>
       <p>SnapGene, GenBank, FASTA, plain DNA, and DOTDNA projects are supported.</p>
-      <button className="primary-button" onClick={onOpen}>Open Document…</button>
+      <div className="empty-actions"><button onClick={onNew}>New DNA…</button><button className="primary-button" onClick={onOpen}>Open Document…</button></div>
     </div>
   );
 }
@@ -233,6 +239,86 @@ function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setSho
   );
 }
 
+function NewDocumentSheet({ suggestedName, onClose, onCreate }: {
+  suggestedName: string;
+  onClose: () => void;
+  onCreate: (request: { name: string; sequence: string; circular: boolean }) => Promise<void>;
+}) {
+  const [name, setName] = useState(suggestedName);
+  const [sequence, setSequence] = useState("");
+  const [circular, setCircular] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const normalizedLength = sequence.replace(/[\s\d]/g, "").length;
+  const hasDraft = name !== suggestedName || normalizedLength > 0 || circular;
+
+  function requestClose() {
+    if (busy) return;
+    if (hasDraft && !window.confirm("Discard this new-document draft?")) return;
+    onClose();
+  }
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || (event.metaKey && event.key.toLowerCase() === "w")) {
+        event.preventDefault();
+        requestClose();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  });
+
+  async function submit() {
+    if (!name.trim() || normalizedLength === 0 || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onCreate({ name, sequence, circular });
+    } catch (submitError) {
+      setError(String(submitError));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && requestClose()}>
+      <section className="new-document-sheet" role="dialog" aria-modal="true" aria-label="New DNA document">
+        <header><div><small>NEW DOCUMENT</small><h2>Create DNA</h2><p>Start with a named sequence, then annotate, design primers, and save it as a DOTDNA project.</p></div><button disabled={busy} onClick={requestClose} aria-label="Close"><Icon name="close" /></button></header>
+        <div className="new-document-fields">
+          <label><span>Name</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Untitled DNA" /></label>
+          <fieldset><legend>Topology</legend><label><input checked={!circular} onChange={() => setCircular(false)} type="radio" name="topology" /> Linear</label><label><input checked={circular} onChange={() => setCircular(true)} type="radio" name="topology" /> Circular</label></fieldset>
+          <label><span>DNA sequence</span><textarea spellCheck={false} value={sequence} onChange={(event) => setSequence(event.target.value)} placeholder="Paste A, C, G, T, or supported ambiguity codes…" /></label>
+          <div className="new-document-meta"><span className="mono">{normalizedLength.toLocaleString()} bases</span><span>The new document remains unsaved until you choose Save.</span></div>
+          {error && <div className="workflow-warning error"><b>Document could not be created</b><p>{error}</p></div>}
+        </div>
+        <footer><span>{busy ? "Creating document…" : "Coordinates will use the entered sequence as position 1."}</span><button disabled={busy} onClick={requestClose}>Cancel</button><button className="primary-button" disabled={busy || !name.trim() || normalizedLength === 0} onClick={() => void submit()}>{busy ? "Creating…" : "Create Document"}</button></footer>
+      </section>
+    </div>
+  );
+}
+
+function UnsavedChangesSheet({ documentNames, quitting, busy, onCancel, onDiscard, onSave }: {
+  documentNames: string[];
+  quitting: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onDiscard: () => void;
+  onSave: () => void;
+}) {
+  const multiple = documentNames.length > 1;
+  const subject = multiple ? `${documentNames.length} edited documents` : documentNames[0] ?? "this document";
+  return (
+    <div className="sheet-backdrop">
+      <section className="unsaved-sheet" role="alertdialog" aria-modal="true" aria-label="Unsaved changes">
+        <div className="unsaved-symbol">!</div>
+        <div><h2>Save changes before {quitting ? "quitting" : "closing"}?</h2><p>{subject} {multiple ? "have" : "has"} changes that have not been saved. Unsaved changes will be lost.</p>{multiple && <ul>{documentNames.map((name) => <li key={name}>{name}</li>)}</ul>}</div>
+        <footer><button disabled={busy} className="destructive-button" onClick={onDiscard}>Don’t Save</button><span /><button disabled={busy} onClick={onCancel}>Cancel</button><button disabled={busy} className="primary-button" onClick={onSave}>{busy ? "Saving…" : multiple ? "Save All" : "Save"}</button></footer>
+      </section>
+    </div>
+  );
+}
+
 function commandError(error: unknown): CommandError {
   if (error && typeof error === "object" && "message" in error && "action" in error) return error as CommandError;
   return { code: "simulation-failed", message: "The simulation could not be completed.", action: String(error) };
@@ -361,8 +447,9 @@ function WorkflowSheet({ workflow, active, onClose, onCreate }: {
 }
 
 export default function App() {
-  const [documents, setDocuments] = useState<OpenDocument[]>([asOpenDocument(demoDocument)]);
+  const [documents, setDocuments] = useState<OpenDocument[]>(() => [asOpenDocument(demoDocument)]);
   const documentsRef = useRef(documents);
+  const savedContentRef = useRef<Record<string, string | null>>({ [documents[0].id]: documentSavepoint(documents[0].document) });
   const [activeId, setActiveId] = useState(documents[0].id);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
@@ -375,6 +462,9 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [showEnzymes, setShowEnzymes] = useState(true);
   const [workflow, setWorkflow] = useState<Workflow>(null);
+  const [newDocumentOpen, setNewDocumentOpen] = useState(false);
+  const [closeRequest, setCloseRequest] = useState<CloseRequest | null>(null);
+  const [closeRequestBusy, setCloseRequestBusy] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [primerChecks, setPrimerChecks] = useState<PrimerCheck[]>([]);
   const [appDiagnostics, setAppDiagnostics] = useState<Diagnostic[]>([]);
@@ -385,10 +475,20 @@ export default function App() {
   const pendingEditIdsRef = useRef(pendingEditIds);
   const [pendingSaveIds, setPendingSaveIds] = useState<Set<string>>(() => new Set());
   const pendingSaveIdsRef = useRef(pendingSaveIds);
+  const [draftDocumentIds, setDraftDocumentIds] = useState<Set<string>>(() => new Set());
+  const draftDocumentIdsRef = useRef(draftDocumentIds);
+  const menuActionRef = useRef<(id: string) => void>(() => undefined);
+  const openingDocumentRef = useRef(false);
+  const reservedSavePathsRef = useRef<Map<string, string>>(new Map());
+  const newDocumentOpenRef = useRef(newDocumentOpen);
+  const workflowRef = useRef(workflow);
+  newDocumentOpenRef.current = newDocumentOpen;
+  workflowRef.current = workflow;
 
   const active = documents.find((document) => document.id === activeId) ?? null;
   const selectedFeature = active ? selectedFeatures[active.id] ?? null : null;
   const activeBusy = active ? pendingEditIds.has(active.id) || pendingSaveIds.has(active.id) : false;
+  const activeCanSave = canSaveDocument(active, activeBusy);
   const canUndo = active ? !activeBusy && (editHistories[active.id]?.undo.length ?? 0) > 0 : false;
   const canRedo = active ? !activeBusy && (editHistories[active.id]?.redo.length ?? 0) > 0 : false;
   const filteredDocuments = useMemo(() => documents.filter((document) => document.document.name.toLowerCase().includes(projectSearch.toLowerCase())), [documents, projectSearch]);
@@ -409,6 +509,42 @@ export default function App() {
     else next.delete(id);
     reference.current = next;
     setter(next);
+  }
+
+  function matchesSavepoint(id: string, document: SequenceDocument) {
+    return matchesDocumentSavepoint(savedContentRef.current[id], document);
+  }
+
+  function setDocumentDraftState(id: string, dirty: boolean) {
+    const next = new Set(draftDocumentIdsRef.current);
+    if (dirty) next.add(id);
+    else next.delete(id);
+    draftDocumentIdsRef.current = next;
+    setDraftDocumentIds(next);
+  }
+
+  function focusDocumentDraft(id: string) {
+    setActiveId(id);
+    updateDocuments((current) => current.map((document) => document.id === id ? { ...document, view: "sequence" } : document));
+    setStatus("Apply or cancel the sequence draft before continuing.");
+  }
+
+  function activateDocument(id: string) {
+    const blockingDraft = [...draftDocumentIdsRef.current].find((draftId) => draftId !== id);
+    if (blockingDraft) {
+      focusDocumentDraft(blockingDraft);
+      return;
+    }
+    setActiveId(id);
+  }
+
+  function beginNewDocument() {
+    const blockingDraft = draftDocumentIdsRef.current.values().next().value as string | undefined;
+    if (blockingDraft) {
+      focusDocumentDraft(blockingDraft);
+      return;
+    }
+    setNewDocumentOpen(true);
   }
 
   useEffect(() => {
@@ -434,21 +570,39 @@ export default function App() {
 
   function setActiveView(view: DocumentView) {
     if (!active) return;
+    if (draftDocumentIdsRef.current.has(active.id) && view !== "sequence") {
+      focusDocumentDraft(active.id);
+      return;
+    }
     updateDocuments((current) => current.map((document) => document.id === active.id ? { ...document, view } : document));
   }
 
   async function openFile() {
+    const blockingDraft = draftDocumentIdsRef.current.values().next().value as string | undefined;
+    if (blockingDraft) {
+      focusDocumentDraft(blockingDraft);
+      return;
+    }
+    if (openingDocumentRef.current) return;
+    openingDocumentRef.current = true;
     try {
       const selected = await open({
         multiple: false,
         directory: false,
-        filters: [{ name: "DNA documents", extensions: ["dna", "gb", "gbk", "fa", "fasta", "json", "txt"] }],
+        filters: [{ name: "DNA documents", extensions: ["dna", "dotdna", "gb", "gbk", "genbank", "fa", "fas", "fasta", "fna", "json", "txt"] }],
       });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (!path) return;
       setStatus(`Opening ${path.split("/").at(-1)}…`);
       const summary = await invoke<DocumentSummary>("open_document", { path });
+      const alreadyOpen = findOpenDocumentByPath(documentsRef.current, summary.path);
+      if (alreadyOpen) {
+        setActiveId(alreadyOpen.id);
+        setStatus(`${summary.document.name} is already open`);
+        return;
+      }
       const opened = asOpenDocument(summary);
+      savedContentRef.current[opened.id] = documentSavepoint(opened.document);
       updateDocuments((current) => [...current, opened]);
       setActiveId(opened.id);
       setSelectedFeatures((current) => ({ ...current, [opened.id]: opened.document.features.length ? 0 : null }));
@@ -459,6 +613,8 @@ export default function App() {
       setAppDiagnostics([{ level: "error", title: "Document could not be opened", body: `${String(error)} Check the file format and try again.` }]);
       setBottomView("Warnings");
       setBottomOpen(true);
+    } finally {
+      openingDocumentRef.current = false;
     }
   }
 
@@ -467,10 +623,23 @@ export default function App() {
       setStatus("Wait for the current edit or save to finish before closing this document.");
       return;
     }
+    if (draftDocumentIdsRef.current.has(id)) {
+      focusDocumentDraft(id);
+      return;
+    }
     const currentDocuments = documentsRef.current;
     const closing = currentDocuments.find((document) => document.id === id);
-    if (closing?.dirty && !window.confirm(`Close ${closing.document.name} without saving your edits?`)) return;
+    if (closing?.dirty) {
+      setCloseRequest({ kind: "document", id });
+      return;
+    }
+    removeDocument(id);
+  }
+
+  function removeDocument(id: string) {
+    const currentDocuments = documentsRef.current;
     const index = currentDocuments.findIndex((document) => document.id === id);
+    if (index < 0) return;
     const next = currentDocuments.filter((document) => document.id !== id);
     documentsRef.current = next;
     setDocuments(next);
@@ -490,6 +659,8 @@ export default function App() {
       editHistoriesRef.current = updated;
       return updated;
     });
+    delete savedContentRef.current[id];
+    setDocumentDraftState(id, false);
     if (id === activeId) setActiveId(next[Math.min(index, next.length - 1)]?.id ?? "");
   }
 
@@ -507,7 +678,15 @@ export default function App() {
     };
     editHistoriesRef.current = nextHistories;
     setEditHistories(nextHistories);
-    updateDocuments((current) => current.map((document) => document.id === active.id ? { ...previous, view: active.view, revision: active.revision + 1 } : document));
+    updateDocuments((current) => current.map((document) => document.id === active.id ? {
+      ...previous,
+      path: active.path,
+      format: active.format,
+      fileVersion: active.fileVersion,
+      dirty: !matchesSavepoint(active.id, previous.document),
+      view: active.view,
+      revision: active.revision + 1,
+    } : document));
     setStatus(`Undid sequence edit · ${previous.length.toLocaleString()} bp`);
   }
 
@@ -525,48 +704,184 @@ export default function App() {
     };
     editHistoriesRef.current = nextHistories;
     setEditHistories(nextHistories);
-    updateDocuments((current) => current.map((document) => document.id === active.id ? { ...next, view: active.view, revision: active.revision + 1 } : document));
+    updateDocuments((current) => current.map((document) => document.id === active.id ? {
+      ...next,
+      path: active.path,
+      format: active.format,
+      fileVersion: active.fileVersion,
+      dirty: !matchesSavepoint(active.id, next.document),
+      view: active.view,
+      revision: active.revision + 1,
+    } : document));
     setStatus(`Redid sequence edit · ${next.length.toLocaleString()} bp`);
   }
 
-  async function saveActiveDocument() {
-    if (!active || !active.dirty || pendingEditIdsRef.current.has(active.id) || pendingSaveIdsRef.current.has(active.id)) return;
-    const savingDocument = active;
+  async function saveDocument(documentId: string, saveAs = false) {
+    const savingDocument = documentsRef.current.find((document) => document.id === documentId);
+    if (!savingDocument || pendingEditIdsRef.current.has(documentId) || pendingSaveIdsRef.current.has(documentId)) return false;
+    if (draftDocumentIdsRef.current.has(documentId)) {
+      focusDocumentDraft(documentId);
+      return false;
+    }
+    if (!saveAs && !canSaveDocument(savingDocument, false)) return true;
+    let reservedPath: string | null = null;
     setPending(setPendingSaveIds, pendingSaveIdsRef, savingDocument.id, true);
     try {
-      const existingProjectPath = savingDocument.format === "DOTDNA Project" ? savingDocument.path : null;
-      const path = existingProjectPath ?? await saveDialog({
-        defaultPath: `${savingDocument.document.name.replace(/\.[^.]+$/, "")}.dotdna.json`,
+      const directPath = !saveAs ? directProjectPath(savingDocument) : null;
+      const path = directPath ?? await saveDialog({
+        defaultPath: defaultProjectPath(savingDocument),
         filters: [{ name: "DOTDNA project", extensions: ["json"] }],
       });
-      if (!path) return;
+      if (!path) {
+        setStatus("Save cancelled");
+        return false;
+      }
+      const resolution = await invoke<SavePathResolution>("resolve_save_path", { path });
+      const resolvedPath = resolution.path;
+      const openOwner = findOpenDocumentByPath(documentsRef.current, resolvedPath);
+      if (openOwner && openOwner.id !== savingDocument.id) {
+        setActiveId(openOwner.id);
+        setStatus(`${resolvedPath.split("/").at(-1)} is already open in another tab`);
+        setAppDiagnostics([{ level: "error", title: "Save As destination is already open", body: `DOTDNA did not overwrite ${openOwner.document.name}. Return to the unsaved document and choose a different file name.` }]);
+        setBottomView("Warnings");
+        setBottomOpen(true);
+        return false;
+      }
+      const reservedBy = reservedSavePathsRef.current.get(resolvedPath);
+      if (reservedBy && reservedBy !== savingDocument.id) {
+        setStatus("Another document is already saving to that location");
+        setAppDiagnostics([{ level: "error", title: "Save destination is busy", body: "Wait for the other save to finish or choose a different file name." }]);
+        setBottomView("Warnings");
+        setBottomOpen(true);
+        return false;
+      }
+      reservedSavePathsRef.current.set(resolvedPath, savingDocument.id);
+      reservedPath = resolvedPath;
       setStatus(`Saving ${savingDocument.document.name}…`);
-      const summary = await invoke<DocumentSummary>("save_document", { path, document: savingDocument.document });
+      const summary = await invoke<DocumentSummary>("save_document", {
+        path: resolvedPath,
+        document: savingDocument.document,
+        expectedFileVersion: directPath ? savingDocument.fileVersion : resolution.fileVersion,
+        destinationMustBeAbsent: !directPath && resolution.fileVersion === null,
+      });
+      savedContentRef.current[savingDocument.id] = documentSavepoint(savingDocument.document);
       const unchanged = documentsRef.current.find((document) => document.id === savingDocument.id)?.revision === savingDocument.revision;
       updateDocuments((current) => current.map((document) => document.id === savingDocument.id ? {
         ...document,
         path: summary.path,
         format: summary.format,
+        fileVersion: summary.fileVersion,
         dirty: document.revision === savingDocument.revision ? false : document.dirty,
       } : document));
-      setStatus(unchanged ? `Saved ${savingDocument.document.name}` : `Saved an earlier revision of ${savingDocument.document.name}; newer edits remain unsaved.`);
+      setAppDiagnostics((current) => current.filter((diagnostic) => diagnostic.title !== "Document could not be saved" && diagnostic.title !== "Project changed on disk"));
+      setStatus(unchanged ? `${saveAs ? "Saved as" : "Saved"} ${summary.path?.split("/").at(-1) ?? savingDocument.document.name}` : `Saved an earlier revision of ${savingDocument.document.name}; newer edits remain unsaved.`);
+      return true;
     } catch (error) {
-      setStatus(`Could not save document: ${String(error)}`);
-      setAppDiagnostics([{ level: "error", title: "Document could not be saved", body: `${String(error)} Choose another writable location and try again.` }]);
+      const changedOnDisk = String(error).includes("changed on disk");
+      setStatus(changedOnDisk ? "Save stopped because the project changed on disk" : `Could not save document: ${String(error)}`);
+      setAppDiagnostics([{ level: "error", title: changedOnDisk ? "Project changed on disk" : "Document could not be saved", body: changedOnDisk ? String(error) : `${String(error)} Choose another writable location and try again.` }]);
       setBottomView("Warnings");
       setBottomOpen(true);
+      return false;
     } finally {
+      if (reservedPath && reservedSavePathsRef.current.get(reservedPath) === savingDocument.id) {
+        reservedSavePathsRef.current.delete(reservedPath);
+      }
       setPending(setPendingSaveIds, pendingSaveIdsRef, savingDocument.id, false);
     }
   }
 
+  async function saveActiveDocument(saveAs = false) {
+    if (!active) return false;
+    return saveDocument(active.id, saveAs);
+  }
+
+  async function createNewDocument(request: { name: string; sequence: string; circular: boolean }) {
+    try {
+      setStatus(`Creating ${request.name.trim()}…`);
+      const summary = await invoke<DocumentSummary>("create_document", { request });
+      const opened = { ...asOpenDocument(summary), dirty: true, view: "sequence" as const };
+      savedContentRef.current[opened.id] = null;
+      updateDocuments((current) => [...current, opened]);
+      setSelectedFeatures((current) => ({ ...current, [opened.id]: null }));
+      setActiveId(opened.id);
+      setNewDocumentOpen(false);
+      setAppDiagnostics([]);
+      setStatus(`Created ${opened.document.name} · save to keep this document`);
+    } catch (error) {
+      setStatus(`Could not create document: ${String(error)}`);
+      throw error;
+    }
+  }
+
+  function discardCloseRequest() {
+    if (!closeRequest) return;
+    if (closeRequest.kind === "document") {
+      removeDocument(closeRequest.id);
+      setCloseRequest(null);
+      return;
+    }
+    setCloseRequest(null);
+    void getCurrentWindow().destroy();
+  }
+
+  async function saveCloseRequest() {
+    if (!closeRequest || closeRequestBusy) return;
+    setCloseRequestBusy(true);
+    try {
+      if (closeRequest.kind === "document") {
+        if (await saveDocument(closeRequest.id)) {
+          removeDocument(closeRequest.id);
+          setCloseRequest(null);
+        }
+        return;
+      }
+      const dirtyDocuments = documentsRef.current.filter((document) => document.dirty);
+      for (const document of dirtyDocuments) {
+        if (!await saveDocument(document.id)) return;
+      }
+      setCloseRequest(null);
+      await getCurrentWindow().destroy();
+    } finally {
+      setCloseRequestBusy(false);
+    }
+  }
+
+  function handleMenuAction(id: string) {
+    if (newDocumentOpen || workflow || closeRequest) {
+      if (id === "file.close" && !closeRequestBusy) {
+        if (newDocumentOpen) setStatus("Use Cancel or Create Document to finish the new-document sheet.");
+        else if (workflow) setWorkflow(null);
+        else setCloseRequest(null);
+      }
+      return;
+    }
+    if (id === "file.new") beginNewDocument();
+    else if (id === "file.open") void openFile();
+    else if (id === "file.save") void saveActiveDocument();
+    else if (id === "file.save-as") void saveActiveDocument(true);
+    else if (id === "file.close" && active) closeDocument(active.id);
+    else {
+      const requestedView = views.find((view) => `view.${view.id}` === id);
+      if (requestedView) setActiveView(requestedView.id);
+    }
+  }
+
+  menuActionRef.current = handleMenuAction;
+
   function chooseWorkflow(next: Exclude<Workflow, null>) {
+    const blockingDraft = draftDocumentIdsRef.current.values().next().value as string | undefined;
+    if (blockingDraft) {
+      focusDocumentDraft(blockingDraft);
+      return;
+    }
     setWorkflow(next);
     setActionsOpen(false);
   }
 
   function createPcrProduct(result: PcrCommandResult) {
-    const opened = asOpenDocument(result.document);
+    const opened = { ...asOpenDocument(result.document), dirty: true };
+    savedContentRef.current[opened.id] = null;
     updateDocuments((current) => [...current, opened]);
     setSelectedFeatures((current) => ({ ...current, [opened.id]: opened.document.features.length ? 0 : null }));
     setActiveId(opened.id);
@@ -613,7 +928,7 @@ export default function App() {
         gcPercent: summary.gcPercent,
         unknownBases: summary.unknownBases,
         diagnostics: summary.diagnostics,
-        dirty: true,
+        dirty: !matchesSavepoint(documentId, summary.document),
         revision: document.revision + 1,
       } : document));
       setStatus(`Edited ${editingDocument.document.name} · ${summary.length.toLocaleString()} bp`);
@@ -629,12 +944,34 @@ export default function App() {
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       const target = event.target;
-      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable)) return;
+      const editingText = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable);
       if (!event.metaKey) return;
-      if (event.key.toLowerCase() === "s") {
+      const key = event.key.toLowerCase();
+      if (newDocumentOpen || workflow || closeRequest) {
+        if (key === "w" && !closeRequestBusy) {
+          event.preventDefault();
+          if (newDocumentOpen) return;
+          if (workflow) setWorkflow(null);
+          else setCloseRequest(null);
+        }
+        return;
+      }
+      if (key === "s") {
         event.preventDefault();
-        void saveActiveDocument();
-      } else if (event.key.toLowerCase() === "z") {
+        void saveActiveDocument(event.shiftKey);
+      } else if (key === "n") {
+        event.preventDefault();
+        beginNewDocument();
+      } else if (key === "o") {
+        event.preventDefault();
+        void openFile();
+      } else if (key === "w" && active) {
+        event.preventDefault();
+        closeDocument(active.id);
+      } else if (!editingText && /^[1-5]$/.test(key) && active) {
+        event.preventDefault();
+        setActiveView(views[Number(key) - 1].id);
+      } else if (!editingText && key === "z") {
         event.preventDefault();
         if (event.shiftKey) redoActiveDocument();
         else undoActiveDocument();
@@ -647,7 +984,32 @@ export default function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
+    void listen<string>("dotdna-menu", (event) => menuActionRef.current(event.payload)).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
     void getCurrentWindow().onCloseRequested((event) => {
+      const draftDocumentId = draftDocumentIdsRef.current.values().next().value as string | undefined;
+      if (draftDocumentId) {
+        event.preventDefault();
+        focusDocumentDraft(draftDocumentId);
+        window.alert("Apply or cancel the sequence draft before quitting DOTDNA.");
+        return;
+      }
+      if (newDocumentOpenRef.current || workflowRef.current) {
+        event.preventDefault();
+        window.alert(`Finish or cancel the ${newDocumentOpenRef.current ? "new document" : "PCR design"} sheet before quitting DOTDNA.`);
+        return;
+      }
       if (pendingEditIdsRef.current.size || pendingSaveIdsRef.current.size) {
         event.preventDefault();
         window.alert("Wait for the current edit or save to finish before quitting DOTDNA.");
@@ -655,9 +1017,7 @@ export default function App() {
       }
       if (!documentsRef.current.some((document) => document.dirty)) return;
       event.preventDefault();
-      if (window.confirm("Quit DOTDNA without saving your edited documents?")) {
-        void getCurrentWindow().destroy();
-      }
+      setCloseRequest({ kind: "quit" });
     }).then((dispose) => {
       if (disposed) dispose();
       else unlisten = dispose;
@@ -673,11 +1033,11 @@ export default function App() {
       <header className="titlebar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><i><span /><span /><span /></i><strong>DOTDNA</strong><em>LAB</em></div>
         <div className="title-document" data-tauri-drag-region>{active?.document.name ?? "No Document"}{active?.dirty ? " •" : ""}</div>
-        <div className="title-actions"><button>⌘K</button></div>
+        <div className="title-actions"><button disabled title="Command palette is planned for a later build.">⌘K</button></div>
       </header>
 
       <section className="toolbar">
-        <div className="tool-group"><ToolButton icon="sidebar" label="Project" active={sidebarOpen} onClick={() => setSidebarOpen((value) => !value)} /><ToolButton icon="open" label="Open" onClick={() => void openFile()} /><ToolButton icon="save" label="Save" disabled={!active?.dirty || activeBusy} onClick={() => void saveActiveDocument()} /></div>
+        <div className="tool-group"><ToolButton icon="sidebar" label="Project" active={sidebarOpen} onClick={() => setSidebarOpen((value) => !value)} /><ToolButton icon="new" label="New" onClick={beginNewDocument} /><ToolButton icon="open" label="Open" onClick={() => void openFile()} /><ToolButton icon="save" label="Save" disabled={!activeCanSave || (active ? draftDocumentIds.has(active.id) : false)} onClick={() => void saveActiveDocument()} /><ToolButton icon="saveAs" label="Save As" disabled={!active || activeBusy || draftDocumentIds.has(active.id)} onClick={() => void saveActiveDocument(true)} /></div>
         <div className="tool-divider" />
         <div className="tool-group"><ToolButton icon="undo" label="Undo" disabled={!canUndo} onClick={undoActiveDocument} /><ToolButton icon="redo" label="Redo" disabled={!canRedo} onClick={redoActiveDocument} /></div>
         <div className="tool-divider" />
@@ -692,9 +1052,9 @@ export default function App() {
 
       <section className={`workspace${sidebarOpen ? "" : " no-sidebar"}${inspectorOpen ? "" : " no-inspector"}${bottomOpen ? "" : " no-bottom"}`}>
         {sidebarOpen && <aside className="project-sidebar">
-          <header><strong>PROJECT</strong><button disabled title="Project creation is not available in this build.">＋</button></header>
+          <header><strong>PROJECT</strong><button onClick={beginNewDocument} title="New DNA document (⌘N)">＋</button></header>
           <div className="project-search"><Icon name="search" /><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Filter files" /></div>
-          <section><h3>OPEN DOCUMENTS <span>{documents.length}</span></h3>{filteredDocuments.map((document) => <button className={document.id === activeId ? "active file-row" : "file-row"} key={document.id} onClick={() => setActiveId(document.id)}><i className={document.document.topology} /><span><strong>{document.document.name}</strong><small>{document.length.toLocaleString()} bp · {document.format}</small></span>{document.dirty && <em>●</em>}</button>)}</section>
+          <section><h3>OPEN DOCUMENTS <span>{documents.length}</span></h3>{filteredDocuments.map((document) => <button className={document.id === activeId ? "active file-row" : "file-row"} key={document.id} onClick={() => activateDocument(document.id)}><i className={document.document.topology} /><span><strong>{document.document.name}</strong><small>{document.length.toLocaleString()} bp · {document.format}</small></span>{document.dirty && <em>●</em>}</button>)}</section>
           <section className="folder-section"><h3>PROJECT FOLDER</h3><p className="folder-empty">No folder is open.</p></section>
           <footer><button disabled title="Folder workspaces are not available in this build.">＋ Open Folder…</button></footer>
         </aside>}
@@ -702,18 +1062,18 @@ export default function App() {
         <section className="document-area">
           <nav className="document-tabs">{documents.length === 0 ? <span>No open documents</span> : documents.map((document) => {
             const busy = pendingEditIds.has(document.id) || pendingSaveIds.has(document.id);
-            return <div className={`document-tab${document.id === activeId ? " active" : ""}`} key={document.id}><button className="document-tab-main" onClick={() => setActiveId(document.id)}><i className={document.document.topology} /><span>{document.document.name}</span>{document.dirty && <em>●</em>}</button><button className="document-tab-close" disabled={busy} title={busy ? "Wait for the current edit or save to finish." : undefined} onClick={() => closeDocument(document.id)} aria-label={`Close ${document.document.name}`}>×</button></div>;
+            return <div className={`document-tab${document.id === activeId ? " active" : ""}`} key={document.id}><button className="document-tab-main" onClick={() => activateDocument(document.id)}><i className={document.document.topology} /><span>{document.document.name}</span>{document.dirty && <em>●</em>}</button><button className="document-tab-close" disabled={busy} title={busy ? "Wait for the current edit or save to finish." : undefined} onClick={() => closeDocument(document.id)} aria-label={`Close ${document.document.name}`}>×</button></div>;
           })}</nav>
           {active ? <>
             <nav className="view-tabs">{views.map((view) => <button className={active.view === view.id ? "active" : ""} key={view.id} onClick={() => setActiveView(view.id)} title={view.shortcut}>{view.label}</button>)}<span /><label><input checked={monochrome} onChange={(event) => setMonochrome(event.target.checked)} type="checkbox" /> Monochrome bases</label></nav>
             <div className="view-content">
               {active.view === "map" && <Suspense fallback={<div className="map-loading">Starting accelerated map renderer…</div>}><PlasmidMap name={active.document.name} topology={active.document.topology} sequenceLength={active.length} features={active.document.features} restrictionSites={restrictionSites} selectedFeature={selectedFeature} onSelectFeature={selectFeature} zoom={zoom} showEnzymes={showEnzymes} /></Suspense>}
-              {active.view === "sequence" && <SequenceView key={active.id} sequence={active.document.sequence} monochrome={monochrome} disabled={activeBusy} onApply={(sequence) => applySequenceEdit(active.id, sequence)} />}
+              {active.view === "sequence" && <SequenceView key={active.id} sequence={active.document.sequence} monochrome={monochrome} disabled={activeBusy} onApply={(sequence) => applySequenceEdit(active.id, sequence)} onDraftStateChange={(dirty) => setDocumentDraftState(active.id, dirty)} />}
               {active.view === "features" && <FeatureTable features={active.document.features} selected={selectedFeature} onSelect={selectFeature} />}
               {active.view === "primers" && <PrimerTable document={active} checks={primerChecks} />}
               {active.view === "history" && <HistoryView document={active} />}
             </div>
-          </> : <EmptyWorkspace onOpen={() => void openFile()} />}
+          </> : <EmptyWorkspace onNew={beginNewDocument} onOpen={() => void openFile()} />}
         </section>
 
         {inspectorOpen && <Inspector active={active} selectedFeature={selectedFeature} />}
@@ -721,7 +1081,18 @@ export default function App() {
       </section>
 
       <footer className="statusbar"><button onClick={() => setBottomOpen((value) => !value)}>{bottomOpen ? "⌄" : "⌃"}</button><span className="status-ready" /> <strong>{status}</strong><div />{active && <><span>{active.document.topology === "circular" ? "Circular" : "Linear"}</span><span>dsDNA</span><span className="mono">{active.length.toLocaleString()} bp</span><span className="mono">GC {active.gcPercent.toFixed(1)}%</span></>}</footer>
+      {newDocumentOpen && <NewDocumentSheet suggestedName={nextUntitledName(documents.map((document) => document.document.name))} onClose={() => setNewDocumentOpen(false)} onCreate={createNewDocument} />}
       {workflow && active && <WorkflowSheet workflow={workflow} active={active} onClose={() => setWorkflow(null)} onCreate={createPcrProduct} />}
+      {closeRequest && <UnsavedChangesSheet
+        documentNames={closeRequest.kind === "quit"
+          ? documents.filter((document) => document.dirty).map((document) => document.document.name)
+          : documents.filter((document) => document.id === closeRequest.id).map((document) => document.document.name)}
+        quitting={closeRequest.kind === "quit"}
+        busy={closeRequestBusy}
+        onCancel={() => setCloseRequest(null)}
+        onDiscard={discardCloseRequest}
+        onSave={() => void saveCloseRequest()}
+      />}
     </main>
   );
 }
