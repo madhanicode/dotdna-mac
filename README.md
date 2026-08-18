@@ -1,80 +1,68 @@
 # DOTDNA
 
-DOTDNA is a local-first DNA and plasmid workspace. It opens SnapGene, GenBank,
-FASTA, DOTDNA project, and raw DNA files; visualizes maps and annotations; and
-supports sequence editing, ORF and restriction-site analysis, primers, PCR,
-translation, exact-overlap/restriction/Golden Gate assembly planning, alignment,
-and export.
+DOTDNA is a local-first DNA and plasmid workbench for Apple-silicon Macs. The
+native Tauri shell and molecular-biology engine are written in Rust; React owns
+the document workbench and PixiJS accelerates circular and linear maps.
 
-Sequence data is processed on the device. The standalone Mac app runs its own
-loopback-only web server and does not require the hosted DOTDNA site or an
-internet connection. The desktop app atomically autosaves the open workspace,
-including sequence edits, annotations, primers, and undo history, inside its
-local application-data directory. On relaunch it restores that workspace; the
-recovery banner and workspace actions can discard the local recovery file.
+The native rewrite opens SnapGene, GenBank, FASTA, DOTDNA project, and raw DNA
+files; visualizes maps, features, primers, history, and restriction sites; edits
+sequences while remapping annotation coordinates; and simulates standard,
+inverse, and overlap-extension PCR. Primer tails and intentional mismatches are
+included in products while only the explicit 3′ binding region is validated and
+thermodynamically scored. Controls that are not implemented yet are visibly
+disabled rather than showing synthetic scientific results.
 
-## Web development
+Sequence data is processed entirely on the device. The Tauri application does
+not start a local server and does not require the hosted DOTDNA site.
 
-Requirements: Node.js 22.13 or newer.
+## Native development
+
+Requirements: Apple-silicon macOS 13+, Rust stable, Node.js 22.13+, and pnpm 10.
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm --dir native tauri:dev
 ```
 
 Useful checks:
 
 ```bash
-npm run build
-node --test tests/*.test.mjs
-npm run lint
+pnpm --dir native test
+pnpm --dir native build
+cd native && cargo fmt --all --check
+cd native && cargo clippy --workspace --all-targets -- -D warnings
+cd native && cargo test --workspace
 ```
 
 ## Standalone Mac app
 
-Install the desktop packaging dependencies once:
+The current native rewrite builds an Apple-silicon Tauri DMG:
 
 ```bash
-npm install
-npm install --prefix desktop
+pnpm --dir native tauri:build
 ```
 
-Build a universal DMG that contains both Apple silicon and Intel code:
-
-```bash
-npm run desktop:dmg
-```
-
-The installer is written to `release/`. The desktop build first creates a
-Next.js standalone bundle, copies its static assets into that bundle, and then
-packages it with Electron. At runtime Electron starts the bundle on a random
-loopback port and opens it in the native application window.
-
-For a faster architecture-specific local build:
-
-```bash
-npm run build:desktop-web
-npm --prefix desktop run dist:arm64
-npm --prefix desktop run dist:x64
-```
+The app bundle and installer are written below
+`native/target/aarch64-apple-darwin/release/bundle/`.
 
 ## Signing and notarization
 
-Unsigned development DMGs can be opened with Finder's **Open** command, but a
-frictionless download-and-install experience requires an Apple Developer ID
-Application certificate and Apple notarization.
+Local builds are ad-hoc signed for development. A frictionless downloadable
+installer requires an Apple Developer ID Application certificate and Apple
+notarization.
 
-The GitHub Actions workflow supports these repository secrets:
+Tagged GitHub Actions releases require these repository secrets:
 
-- `CSC_LINK`: base64-encoded Developer ID Application certificate (`.p12`)
-- `CSC_KEY_PASSWORD`: password for that certificate
+- `APPLE_CERTIFICATE`: base64-encoded Developer ID Application certificate (`.p12`)
+- `APPLE_CERTIFICATE_PASSWORD`: password for that certificate
+- `APPLE_SIGNING_IDENTITY`: full Developer ID Application identity
 - `APPLE_ID`: Apple account used for notarization
-- `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for that account
+- `APPLE_PASSWORD`: app-specific password for that account
 - `APPLE_TEAM_ID`: Apple Developer team identifier
 
-With those secrets configured, tagged builds are signed and notarized. Without
-them, the workflow still produces an unsigned universal DMG artifact for
-testing.
+The workflow fails closed when any signing or notarization secret is missing;
+it never uploads or publishes an unsigned release DMG. Local builds remain
+available for internal testing.
 
 ## Releases
 
@@ -83,5 +71,5 @@ also build the DMG and attach it to a GitHub release.
 
 ## Privacy
 
-The desktop server binds only to `127.0.0.1`. DOTDNA does not upload sequence
-files unless a future feature explicitly asks the user to do so.
+DOTDNA does not upload sequence files unless a future feature explicitly asks
+the user to do so.
