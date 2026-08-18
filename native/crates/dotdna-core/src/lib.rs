@@ -1,10 +1,15 @@
 //! Biological document model and deterministic operations for DOTDNA.
 
+mod digest;
 mod document;
 mod pcr;
 mod search;
 mod translation;
 
+pub use digest::{
+    DigestEnd, DigestEndType, DigestError, DigestFragment, RestrictionCut, RestrictionDigest,
+    simulate_restriction_digest,
+};
 pub use document::{
     AnnotationError, DiagnosticSeverity, DocumentDiagnostic, DocumentMetadata, DocumentNotes,
     DocumentStats, Feature, FeatureSegment, HistoryEntry, HistoryOperation, PacketFormat, Primer,

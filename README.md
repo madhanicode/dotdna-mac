@@ -6,8 +6,10 @@ the document workbench and PixiJS accelerates circular and linear maps.
 
 The native rewrite opens SnapGene, GenBank, FASTA, DOTDNA project, and raw DNA
 files; visualizes maps, features, primers, history, and restriction sites; edits
-sequences while remapping annotation coordinates; and simulates standard,
-inverse, and overlap-extension PCR. Primer tails and intentional mismatches are
+sequences while remapping annotation coordinates; simulates standard, inverse,
+and overlap-extension PCR; and predicts complete restriction digests with
+explicit double-strand cuts, sticky-end chemistry, and deterministic linear
+fragment documents. Primer tails and intentional mismatches are
 included in products while only the explicit 3′ binding region is validated and
 thermodynamically scored. It also creates new DNA documents and provides native
 New, Open, Save, and Save As workflows with unsaved-change protection and
@@ -16,8 +18,9 @@ visibly disabled rather than showing synthetic scientific results.
 
 The project sidebar can scan real folders for supported DNA documents without
 following symlinks or indexing dependency/build caches. The command palette
-(`⌘K`) exposes the implemented file, view, annotation, search, and PCR actions
-with the same safety guards as the toolbar and native macOS menus.
+(`⌘K`) exposes the implemented file, view, annotation, search, PCR, and
+restriction-digest actions with the same safety guards as the toolbar and native
+macOS menus.
 
 Sequence data is processed entirely on the device. The Tauri application does
 not start a local server and does not require the hosted DOTDNA site.

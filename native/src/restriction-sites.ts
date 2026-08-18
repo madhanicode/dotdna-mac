@@ -16,9 +16,10 @@ export type RestrictionSite = {
 export type RestrictionSiteScan = {
   sites: RestrictionSite[];
   truncated: boolean;
+  truncatedEnzymes: string[];
 };
 
-const enzymes = [
+export const restrictionEnzymes = [
   { enzyme: "BamHI", recognitionSequence: "GGATCC", topCutOffset: 1, bottomCutOffset: 5 },
   { enzyme: "BsaI", recognitionSequence: "GGTCTC", topCutOffset: 7, bottomCutOffset: 11 },
   { enzyme: "EcoRI", recognitionSequence: "GAATTC", topCutOffset: 1, bottomCutOffset: 5 },
@@ -27,6 +28,8 @@ const enzymes = [
   { enzyme: "XhoI", recognitionSequence: "CTCGAG", topCutOffset: 1, bottomCutOffset: 5 },
 ] as const;
 
+export type RestrictionEnzymeDefinition = typeof restrictionEnzymes[number];
+
 function reverseComplement(sequence: string) {
   const complement: Record<string, string> = { A: "T", C: "G", G: "C", T: "A" };
   return [...sequence].reverse().map((base) => complement[base] ?? "N").join("");
@@ -34,10 +37,10 @@ function reverseComplement(sequence: string) {
 
 export function scanRestrictionSites(sequenceValue: string, circular: boolean, maximumSitesPerEnzyme = 1_000): RestrictionSiteScan {
   const sequence = sequenceValue.toUpperCase();
-  if (!sequence) return { sites: [], truncated: false };
+  if (!sequence) return { sites: [], truncated: false, truncatedEnzymes: [] };
   const sites: RestrictionSite[] = [];
-  let truncated = false;
-  for (const definition of enzymes) {
+  const truncatedEnzymes = new Set<string>();
+  for (const definition of restrictionEnzymes) {
     const { enzyme, recognitionSequence, topCutOffset, bottomCutOffset } = definition;
     const reverse = reverseComplement(recognitionSequence);
     const orientations = new Set([recognitionSequence, reverse]);
@@ -48,7 +51,7 @@ export function scanRestrictionSites(sequenceValue: string, circular: boolean, m
       let position = searchable.indexOf(orientation);
       while (position >= 0 && position < sequence.length) {
         if (enzymeSiteCount >= maximumSitesPerEnzyme) {
-          truncated = true;
+          truncatedEnzymes.add(enzyme);
           break orientationLoop;
         }
         const rawTopCut = position + (strand === "forward" ? topCutOffset : recognitionSequence.length - bottomCutOffset);
@@ -74,7 +77,7 @@ export function scanRestrictionSites(sequenceValue: string, circular: boolean, m
     }
   }
   sites.sort((left, right) => left.position - right.position || left.enzyme.localeCompare(right.enzyme));
-  return { sites, truncated };
+  return { sites, truncated: truncatedEnzymes.size > 0, truncatedEnzymes: [...truncatedEnzymes].sort() };
 }
 
 export function findRestrictionSites(sequenceValue: string, circular: boolean): RestrictionSite[] {

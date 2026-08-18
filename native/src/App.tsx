@@ -3,15 +3,17 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentProps, ReactNode } from "react";
+import type { ComponentProps, ReactNode, Ref } from "react";
 import { FeatureEditor, PrimerEditor } from "./AnnotationEditors";
 import { CommandPalette, type PaletteCommand } from "./CommandPalette";
 import { demoDocument } from "./demo";
+import { DigestSheet } from "./DigestSheet";
+import { restrictionSiteCounts } from "./digest-workflows";
 import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nativeMenuPayload, nativeMenuState, nextUntitledName } from "./document-workflows";
 import { scanRestrictionSites, type RestrictionSite } from "./restriction-sites";
 import { SequenceView } from "./SequenceView";
 import { displayIntervals, normalizeIntervals, selectionLength, validateFindQuery, type SequenceMatch, type SequenceSelection } from "./sequence-selection";
-import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, OpenReadingFrame, OrfTranslation, PcrCommandResult, Primer, PrimerCheck, ProjectFolderSummary, SequenceDocument } from "./types";
+import type { CommandError, DigestCommandFragment, DigestCommandResult, DocumentSummary, DocumentView, Feature, OpenDocument, OpenReadingFrame, OrfTranslation, PcrCommandResult, Primer, PrimerCheck, ProjectFolderSummary, SequenceDocument } from "./types";
 
 const PlasmidMap = lazy(() => import("./PlasmidMap").then((module) => ({ default: module.PlasmidMap })));
 
@@ -32,7 +34,8 @@ const bottomNavigation: Array<{ label: string; view?: BottomView; reason?: strin
   { label: "ORFs", view: "ORFs" },
   { label: "Warnings", view: "Warnings" },
 ];
-type Workflow = "PCR" | "Inverse PCR" | "Overlap-Extension PCR" | null;
+type PcrWorkflow = "PCR" | "Inverse PCR" | "Overlap-Extension PCR";
+type Workflow = PcrWorkflow | "Restriction Digest" | null;
 type Diagnostic = { level: "warn" | "error"; title: string; body: string };
 type EditHistory = { undo: OpenDocument[]; redo: OpenDocument[] };
 type CloseRequest = { kind: "document"; id: string } | { kind: "quit" };
@@ -116,9 +119,9 @@ function Icon({ name }: { name: string }) {
   return <svg className="icon" aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.45">{drawing}</svg>;
 }
 
-function ToolButton({ icon, label, disabled, disabledReason, onClick, active }: { icon: string; label: string; disabled?: boolean; disabledReason?: string; onClick?: () => void; active?: boolean }) {
+function ToolButton({ icon, label, disabled, disabledReason, onClick, onKeyDown, active, expanded, hasPopup, controls, buttonRef }: { icon: string; label: string; disabled?: boolean; disabledReason?: string; onClick?: ComponentProps<"button">["onClick"]; onKeyDown?: ComponentProps<"button">["onKeyDown"]; active?: boolean; expanded?: boolean; hasPopup?: boolean; controls?: string; buttonRef?: Ref<HTMLButtonElement> }) {
   return (
-    <button aria-pressed={active ?? undefined} className={`tool-button${active ? " active" : ""}`} disabled={disabled} onClick={onClick} title={disabled && disabledReason ? disabledReason : label}>
+    <button aria-controls={controls} aria-expanded={expanded} aria-haspopup={hasPopup ? "menu" : undefined} aria-pressed={hasPopup ? undefined : active ?? undefined} className={`tool-button${active ? " active" : ""}`} disabled={disabled} onClick={onClick} onKeyDown={onKeyDown} ref={buttonRef} title={disabled && disabledReason ? disabledReason : label}>
       <Icon name={icon} />
       <span>{label}</span>
     </button>
@@ -517,7 +520,7 @@ function commandError(error: unknown): CommandError {
 }
 
 function WorkflowSheet({ workflow, active, onClose, onCreate, onBusyChange }: {
-  workflow: Exclude<Workflow, null>; active: OpenDocument; onClose: () => void; onCreate: (result: PcrCommandResult) => void; onBusyChange: (busy: boolean) => void;
+  workflow: PcrWorkflow; active: OpenDocument; onClose: () => void; onCreate: (result: PcrCommandResult) => void; onBusyChange: (busy: boolean) => void;
 }) {
   const primers = active.document.primers;
   const [forwardIndex, setForwardIndex] = useState(0);
@@ -756,6 +759,8 @@ export default function App() {
   const primerCheckTokenRef = useRef(0);
   const primerCheckInFlightRef = useRef(false);
   const primerCheckQueuedRunRef = useRef<(() => void) | null>(null);
+  const actionsButtonRef = useRef<HTMLButtonElement>(null);
+  const actionsMenuRef = useRef<HTMLDivElement>(null);
   newDocumentOpenRef.current = newDocumentOpen;
   workflowRef.current = workflow;
   workflowBusyRef.current = workflowBusy;
@@ -810,8 +815,34 @@ export default function App() {
       return activeProjectFileVisible && active?.path ? active.path : filteredProjectFiles[0].path;
     });
   }, [active?.path, activeProjectFileVisible, filteredProjectFiles]);
-  const restrictionScan = useMemo(() => active ? scanRestrictionSites(active.document.sequence, active.document.topology === "circular") : { sites: [], truncated: false }, [active?.document.sequence, active?.document.topology]);
+
+  useEffect(() => {
+    if (!actionsOpen) return;
+    if (!commandEligibility.molecularActions) {
+      setActionsOpen(false);
+      return;
+    }
+    const closeFromEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setActionsOpen(false);
+      window.requestAnimationFrame(() => actionsButtonRef.current?.focus());
+    };
+    const closeFromOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || actionsMenuRef.current?.contains(target) || actionsButtonRef.current?.contains(target)) return;
+      setActionsOpen(false);
+    };
+    document.addEventListener("keydown", closeFromEscape);
+    document.addEventListener("pointerdown", closeFromOutside);
+    return () => {
+      document.removeEventListener("keydown", closeFromEscape);
+      document.removeEventListener("pointerdown", closeFromOutside);
+    };
+  }, [actionsOpen, commandEligibility.molecularActions]);
+  const restrictionScan = useMemo(() => active ? scanRestrictionSites(active.document.sequence, active.document.topology === "circular") : { sites: [], truncated: false, truncatedEnzymes: [] }, [active?.document.sequence, active?.document.topology]);
   const restrictionSites = restrictionScan.sites;
+  const restrictionCounts = useMemo(() => restrictionSiteCounts(restrictionSites), [restrictionSites]);
   const findQuery = active ? findQueries[active.id] ?? "" : "";
   const findValidation = useMemo(() => validateFindQuery(findQuery), [findQuery]);
   const activeFindAnalysis = active ? findAnalyses[active.id] ?? null : null;
@@ -1789,7 +1820,7 @@ export default function App() {
   function requestCloseWorkflow() {
     if (!workflow) return;
     if (workflowBusyRef.current) {
-      setStatus("Wait for the PCR calculation to finish before closing the workflow");
+      setStatus("Wait for the molecular calculation to finish before closing the workflow");
       return;
     }
     setWorkflow(null);
@@ -1855,6 +1886,10 @@ export default function App() {
     else if (id === "file.close" && active) closeDocument(active.id);
     else if (id === "edit.undo-document") undoActiveDocument();
     else if (id === "edit.redo-document") redoActiveDocument();
+    else if (id === "actions.pcr") chooseWorkflow("PCR");
+    else if (id === "actions.inverse-pcr") chooseWorkflow("Inverse PCR");
+    else if (id === "actions.overlap-pcr") chooseWorkflow("Overlap-Extension PCR");
+    else if (id === "actions.restriction-digest") chooseWorkflow("Restriction Digest");
     else {
       const requestedView = views.find((view) => `view.${view.id}` === id);
       if (requestedView) {
@@ -1896,6 +1931,35 @@ export default function App() {
       [opened.id]: result.product.warnings.map((warning) => ({ level: "warn", title: "PCR design advisory", body: warning })),
     }));
     if (result.product.warnings.length) {
+      setBottomView("Warnings");
+      setBottomOpen(true);
+    }
+  }
+
+  function createDigestFragment(result: DigestCommandResult, fragment: DigestCommandFragment) {
+    const template = documentsRef.current.find((document) => document.id === result.templateId);
+    if (!template || template.revision !== result.templateRevision) {
+      updateWorkflowBusy(false);
+      setWorkflow(null);
+      setStatus("Digest preview expired because the template changed");
+      setAppDiagnostics([{ level: "warn", title: "Digest preview expired", body: "Reopen Restriction Digest to recalculate cuts from the current document revision." }]);
+      setBottomView("Warnings");
+      setBottomOpen(true);
+      return;
+    }
+    const opened = { ...asOpenDocument(fragment.document), dirty: true };
+    savedContentRef.current[opened.id] = null;
+    updateDocuments((current) => [...current, opened]);
+    setSelectedFeatures((current) => ({ ...current, [opened.id]: opened.document.features.length ? opened.document.features.length - 1 : null }));
+    setActiveId(opened.id);
+    updateWorkflowBusy(false);
+    setWorkflow(null);
+    setStatus(`Created ${opened.document.name} · ${fragment.length.toLocaleString()} bp`);
+    setDocumentDiagnostics((current) => ({
+      ...current,
+      [opened.id]: result.warnings.map((warning) => ({ level: "warn", title: "Restriction digest advisory", body: warning })),
+    }));
+    if (result.warnings.length) {
       setBottomView("Warnings");
       setBottomOpen(true);
     }
@@ -2043,7 +2107,7 @@ export default function App() {
       }
       if (newDocumentOpenRef.current || workflowRef.current || annotationEditorRef.current) {
         event.preventDefault();
-        window.alert(`Finish or cancel the ${newDocumentOpenRef.current ? "new document" : workflowRef.current ? "PCR design" : "annotation editor"} sheet before quitting DOTDNA.`);
+        window.alert(`Finish or cancel the ${newDocumentOpenRef.current ? "new document" : workflowRef.current ? "molecular workflow" : "annotation editor"} sheet before quitting DOTDNA.`);
         return;
       }
       if (pendingEditIdsRef.current.size || pendingSaveIdsRef.current.size) {
@@ -2084,6 +2148,7 @@ export default function App() {
     { id: "pcr", label: "PCR…", detail: "Amplify between two stored primer sites", group: "Molecular Workflows", keywords: ["amplicon"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => chooseWorkflow("PCR") },
     { id: "inverse-pcr", label: "Inverse PCR…", detail: "Mutate or delete circular DNA", group: "Molecular Workflows", keywords: ["mutagenesis"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => chooseWorkflow("Inverse PCR") },
     { id: "overlap-pcr", label: "Overlap-Extension PCR…", detail: "Join overlapping PCR products", group: "Molecular Workflows", keywords: ["oe pcr assembly"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => chooseWorkflow("Overlap-Extension PCR") },
+    { id: "restriction-digest", label: "Restriction Digest…", detail: "Predict complete cleavage and create a selected fragment", group: "Molecular Workflows", keywords: ["digest restriction enzyme cut fragment"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => chooseWorkflow("Restriction Digest") },
   ];
 
   const mapPane = active ? <Suspense fallback={<div className="map-loading">Starting accelerated map renderer…</div>}><PlasmidMap name={active.document.name} topology={active.document.topology} sequenceLength={active.length} features={active.document.features} primers={active.document.primers} restrictionSites={restrictionSites} restrictionSitesTruncated={restrictionScan.truncated} selection={activeSelection} selectedFeature={selectedFeature} selectedPrimer={selectedPrimer} onSelectFeature={selectFeature} onSelectPrimer={selectPrimer} onSelectRestrictionSite={selectRestrictionSite} zoom={zoom} showEnzymes={showEnzymes} showFeatureLabels={showFeatureLabels} showPrimers={showPrimers} /></Suspense> : null;
@@ -2103,8 +2168,34 @@ export default function App() {
         <div className="tool-group"><ToolButton icon="undo" label="Undo" disabled={!canUndo} onClick={undoActiveDocument} /><ToolButton icon="redo" label="Redo" disabled={!canRedo} onClick={redoActiveDocument} /></div>
         <div className="tool-divider" />
         <div className="tool-group"><ToolButton icon="annotate" label="Feature" disabled={!active || activeBusy} onClick={() => openFeatureEditor()} /><ToolButton icon="primer" label="Primer" disabled={!active || activeBusy} onClick={() => openPrimerEditor()} />
-          <div className="action-menu-wrap"><ToolButton icon="actions" label="Actions" active={actionsOpen} disabled={!active} onClick={() => setActionsOpen((value) => !value)} />
-            {actionsOpen && <div className="action-menu"><small>MOLECULAR ACTIONS</small><button onClick={() => chooseWorkflow("PCR")}><b>PCR…</b><span>Amplify between primers</span></button><button onClick={() => chooseWorkflow("Inverse PCR")}><b>Inverse PCR…</b><span>Mutate or delete circular DNA</span></button><button onClick={() => chooseWorkflow("Overlap-Extension PCR")}><b>Overlap-Extension PCR…</b><span>Join overlapping products</span></button><hr /><button disabled title="Restriction digest is planned but not implemented yet."><b>Restriction Digest…</b><span>Planned</span></button><button disabled title="Assembly is planned but not implemented yet."><b>Assembly…</b><span>Planned</span></button></div>}
+          <div className="action-menu-wrap"><ToolButton active={actionsOpen} buttonRef={actionsButtonRef} controls="molecular-actions-menu" disabled={!commandEligibility.molecularActions} disabledReason={draftDocumentIds.size ? "Apply or cancel the open draft first" : "Open an idle document first"} expanded={actionsOpen} hasPopup icon="actions" label="Actions" onClick={(event) => {
+            const opening = !actionsOpen;
+            setActionsOpen(opening);
+            if (opening && event.detail === 0) window.requestAnimationFrame(() => actionsMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus());
+          }} onKeyDown={(event) => {
+            if (event.key !== "ArrowDown") return;
+            event.preventDefault();
+            setActionsOpen(true);
+            window.requestAnimationFrame(() => actionsMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus());
+          }} />
+            {actionsOpen && <div aria-label="Molecular actions" className="action-menu" id="molecular-actions-menu" onFocusCapture={(event) => {
+              const focusedItem = event.target as HTMLElement;
+              if (!(focusedItem instanceof HTMLButtonElement) || focusedItem.getAttribute("role") !== "menuitem") return;
+              event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)').forEach((item) => { item.tabIndex = item === focusedItem ? 0 : -1; });
+            }} onKeyDown={(event) => {
+              if (event.key === "Tab") {
+                setActionsOpen(false);
+                return;
+              }
+              if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+              const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+              if (!items.length) return;
+              event.preventDefault();
+              const current = items.indexOf(document.activeElement as HTMLButtonElement);
+              const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : event.key === "ArrowDown" ? (current + 1) % items.length : (current - 1 + items.length) % items.length;
+              items.forEach((item, index) => { item.tabIndex = index === next ? 0 : -1; });
+              items[next].focus();
+            }} ref={actionsMenuRef} role="menu"><small role="presentation">MOLECULAR ACTIONS</small><button onClick={() => chooseWorkflow("PCR")} role="menuitem" tabIndex={0}><b>PCR…</b><span>Amplify between primers</span></button><button onClick={() => chooseWorkflow("Inverse PCR")} role="menuitem" tabIndex={-1}><b>Inverse PCR…</b><span>Mutate or delete circular DNA</span></button><button onClick={() => chooseWorkflow("Overlap-Extension PCR")} role="menuitem" tabIndex={-1}><b>Overlap-Extension PCR…</b><span>Join overlapping products</span></button><hr role="presentation" /><button onClick={() => chooseWorkflow("Restriction Digest")} role="menuitem" tabIndex={-1}><b>Restriction Digest…</b><span>Predict complete cleavage and fragments</span></button><button disabled role="menuitem" tabIndex={-1} title="Assembly is planned but not implemented yet."><b>Assembly…</b><span>Planned</span></button></div>}
           </div>
         </div>
         <div className="toolbar-spacer" />
@@ -2201,7 +2292,8 @@ export default function App() {
 
       <footer className="statusbar"><button onClick={() => setBottomOpen((value) => !value)}>{bottomOpen ? "⌄" : "⌃"}</button><span className="status-ready" /> <strong>{status}</strong><div />{active && <><span>{active.document.topology === "circular" ? "Circular" : "Linear"}</span><span>dsDNA</span><span className="mono">{active.length.toLocaleString()} bp</span><span className="mono">GC {active.gcPercent.toFixed(1)}%</span></>}</footer>
       {newDocumentOpen && <NewDocumentSheet suggestedName={nextUntitledName(documents.map((document) => document.document.name))} onClose={() => setNewDocumentOpen(false)} onCreate={createNewDocument} />}
-      {workflow && active && <WorkflowSheet workflow={workflow} active={active} onClose={requestCloseWorkflow} onCreate={createPcrProduct} onBusyChange={updateWorkflowBusy} />}
+      {workflow && workflow !== "Restriction Digest" && active && <WorkflowSheet workflow={workflow} active={active} onClose={requestCloseWorkflow} onCreate={createPcrProduct} onBusyChange={updateWorkflowBusy} />}
+      {workflow === "Restriction Digest" && active && <DigestSheet key={`${active.id}:${active.revision}`} active={active} siteCounts={restrictionCounts} truncatedEnzymes={restrictionScan.truncatedEnzymes} onClose={requestCloseWorkflow} onCreate={createDigestFragment} onBusyChange={updateWorkflowBusy} />}
       {annotationEditor?.kind === "feature" && annotationDocument && <FeatureEditor key={`${annotationEditor.documentId}:${annotationEditor.revision}:${annotationEditor.index ?? "new"}`} documentName={annotationDocument.document.name} sequence={annotationDocument.document.sequence} topology={annotationDocument.document.topology} feature={annotationEditor.index === null ? null : annotationDocument.document.features[annotationEditor.index] ?? null} suggestedIntervals={annotationEditor.index === null && sequenceSelections[annotationEditor.documentId]?.revision === annotationEditor.revision ? sequenceSelections[annotationEditor.documentId]?.intervals ?? [] : []} onClose={closeAnnotationEditor} onDirtyChange={(dirty) => setDocumentDraftState(annotationEditor.documentId, dirty)} onSave={saveFeatureAnnotation} onDelete={annotationEditor.index === null ? undefined : deleteFeatureAnnotation} />}
       {annotationEditor?.kind === "primer" && annotationDocument && <PrimerEditor key={`${annotationEditor.documentId}:${annotationEditor.revision}:${annotationEditor.index ?? "new"}`} documentName={annotationDocument.document.name} sequence={annotationDocument.document.sequence} topology={annotationDocument.document.topology} primer={annotationEditor.index === null ? null : annotationDocument.document.primers[annotationEditor.index] ?? null} onClose={closeAnnotationEditor} onDirtyChange={(dirty) => setDocumentDraftState(annotationEditor.documentId, dirty)} onSave={savePrimerAnnotation} onDelete={annotationEditor.index === null ? undefined : deletePrimerAnnotation} />}
       {closeRequest && <UnsavedChangesSheet

@@ -483,12 +483,59 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .validation-grid strong { color: #ced2d6; font-family: var(--mono); font-size: 10px; margin-top: 5px; }
 .validation-grid small { color: #777d85; font-family: var(--mono); font-size: 8px; margin-top: 4px; }
 .product-warnings { background: #25211d; border: 1px solid #4a3f33; grid-column: 1 / -1; padding: 10px 12px; }
-.product-warnings > strong { color: #e2b992; font-size: 9px; }
-.product-warnings p { color: #a68e7a; font-size: 8px; line-height: 1.45; margin: 5px 0 0; }
+.product-warnings > strong { color: #e8c29d; font-size: 10px; }
+.product-warnings > summary { color: #edc49d; cursor: pointer; font-size: 10px; font-weight: 650; }
+.product-warnings p { color: #c0a68e; font-size: 10px; line-height: 1.45; margin: 6px 0 0; }
 .workflow-sheet > footer { align-items: center; background: #17191c; border-top: 1px solid #34383e; display: flex; gap: 8px; justify-content: flex-end; padding: 11px 14px; }
 .workflow-sheet > footer button { background: #292d32; border: 1px solid #40454c; border-radius: 3px; color: #b9bec4; font-size: 9px; min-height: 29px; padding: 0 12px; }
 .workflow-sheet > footer > span { color: #6f757d; font-size: 8px; margin-right: auto; }
 .workflow-sheet > footer button:disabled { cursor: not-allowed; opacity: .45; }
+.digest-sheet { max-height: min(720px, calc(100vh - 40px)); width: min(920px, calc(100vw - 56px)); }
+.digest-body { display: grid; grid-template-columns: minmax(250px, 310px) minmax(0, 1fr); min-height: 0; overflow: hidden; }
+.digest-enzyme-panel, .digest-fragment-panel { min-height: 0; overflow: auto; }
+.digest-enzyme-panel { background: #181a1d; border-right: 1px solid #34383e; display: grid; grid-template-rows: auto minmax(0,1fr); }
+.digest-enzyme-panel > header { border-bottom: 1px solid #30343a; display: grid; gap: 9px; padding: 12px; }
+.digest-enzyme-panel > header label { display: grid; gap: 5px; }
+.digest-enzyme-panel > header label span { color: #8c929a; font-size: 9px; font-weight: 600; }
+.digest-enzyme-panel input[type="text"], .digest-enzyme-panel > header input { background: #101215; border: 1px solid #3b4047; border-radius: 3px; color: #dfe2e5; font-size: 10px; min-height: 30px; padding: 0 8px; user-select: text; }
+.digest-enzyme-panel > header div { display: flex; gap: 6px; }
+.digest-scan-note { background: #27231e; border-left: 2px solid var(--orange); color: #b69c83; font-size: 9px; line-height: 1.4; margin: 0; padding: 6px 8px; }
+.digest-enzyme-panel button { background: #272b30; border: 1px solid #3d4249; border-radius: 3px; color: #b8bdc3; font-size: 9px; min-height: 27px; padding: 0 8px; }
+.digest-enzyme-panel button:disabled { opacity: .4; }
+.digest-enzyme-list { align-content: start; display: grid; min-height: 0; overflow: auto; padding: 6px; }
+.digest-enzyme-list > label { align-items: center; border: 1px solid transparent; border-radius: 3px; display: grid; gap: 7px; grid-template-columns: auto 1fr auto; min-width: 0; padding: 8px; }
+.digest-enzyme-list > label:hover { background: #212429; }
+.digest-enzyme-list > label.selected { background: #20343a; border-color: #35616a; }
+.digest-enzyme-list input { accent-color: var(--cyan); }
+.digest-enzyme-list span { display: grid; gap: 3px; min-width: 0; }
+.digest-enzyme-list strong { color: #d7dadd; font-size: 10px; }
+.digest-enzyme-list small { color: #8c939b; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.digest-enzyme-list em { color: #a8aeb5; font-family: var(--mono); font-size: 9px; font-style: normal; text-align: right; }
+.digest-enzyme-list > p { color: #777e86; font-size: 10px; padding: 12px; }
+.digest-fragment-panel { align-content: start; display: grid; gap: 10px; padding: 14px; }
+.digest-empty { align-self: center; color: #858c94; justify-self: center; max-width: 340px; padding: 40px 20px; text-align: center; }
+.digest-empty strong { color: #c5c9ce; font-size: 12px; }
+.digest-empty p { font-size: 9px; line-height: 1.55; }
+.digest-summary { border: 1px solid #34383e; display: grid; grid-template-columns: 2fr 1fr 1fr; }
+.digest-summary > div { display: grid; gap: 4px; padding: 9px 10px; }
+.digest-summary > div + div { border-left: 1px solid #34383e; }
+.digest-summary span { color: #858c94; font-size: 9px; }
+.digest-summary strong { color: #d3d7da; font-family: var(--mono); font-size: 10px; }
+.digest-fragment-list { align-content: start; display: grid; gap: 6px; }
+.digest-fragment-list > label { align-items: start; background: #17191c; border: 1px solid #343941; border-radius: 3px; display: grid; gap: 8px; grid-template-columns: auto 1fr auto; padding: 9px; }
+.digest-fragment-list > label:hover { background: #202329; }
+.digest-fragment-list > label.selected { background: #20363b; border-color: #3d727c; box-shadow: inset 3px 0 var(--cyan); }
+.digest-fragment-list input { accent-color: var(--cyan); margin-top: 2px; }
+.digest-fragment-list span { display: grid; gap: 3px; min-width: 0; }
+.digest-fragment-list strong { color: #dce0e3; font-size: 10px; }
+.digest-fragment-list small { color: #959ca4; font-family: var(--mono); font-size: 9px; line-height: 1.4; }
+.digest-fragment-list em { color: #c1c6cb; font-family: var(--mono); font-size: 9px; font-style: normal; line-height: 1.6; text-align: right; white-space: nowrap; }
+.digest-sheet > footer > span { color: #8a9199; font-size: 9px; }
+@media (max-width: 900px) {
+  .digest-body { grid-template-columns: 1fr; overflow: auto; }
+  .digest-enzyme-panel { border-bottom: 1px solid #34383e; border-right: 0; max-height: 250px; }
+  .digest-fragment-panel { overflow: visible; }
+}
 
 .annotation-backdrop { align-items: center; background: rgba(0,0,0,.62); display: flex; inset: 0; justify-content: center; position: fixed; z-index: 520; }
 .annotation-sheet { background: #1b1e22; border: 1px solid #4a5058; border-radius: 6px; box-shadow: 0 28px 80px rgba(0,0,0,.76); display: grid; grid-template-rows: auto minmax(0,1fr) auto; max-height: min(720px, calc(100vh - 56px)); overflow: hidden; width: min(680px, calc(100vw - 72px)); }

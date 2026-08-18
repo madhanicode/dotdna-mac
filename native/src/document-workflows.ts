@@ -13,6 +13,7 @@ export type NativeMenuState = {
   undo: boolean;
   redo: boolean;
   changeView: boolean;
+  molecularActions: boolean;
   activeView: DocumentView | null;
 };
 
@@ -29,6 +30,7 @@ export function nativeMenuPayload(state: NativeMenuState) {
     state.close ? "file.close" : null,
     state.undo ? "edit.undo-document" : null,
     state.redo ? "edit.redo-document" : null,
+    ...(state.molecularActions ? ["actions.pcr", "actions.inverse-pcr", "actions.overlap-pcr", "actions.restriction-digest"] : []),
     ...(state.changeView ? nativeViewIds.map((view) => `view.${view}`) : []),
   ].filter((id): id is string => id !== null);
   return { enabled, activeView: state.activeView };
@@ -57,6 +59,7 @@ export function nativeMenuState(input: {
     undo: !blocked && input.canUndo,
     redo: !blocked && input.canRedo,
     changeView: !blocked && input.hasActiveDocument,
+    molecularActions: !blocked && input.hasActiveDocument && !input.activeBusy,
     activeView: input.activeView,
   };
 }

@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dotdna_core::{
-    DocumentDiagnostic, Feature, OpenReadingFrame, OrfAnalysisResult, OrfTranslation, PcrOptions,
-    PcrProduct, Primer, PrimerAnalysis, PrimerBinding, SequenceDocument, SequenceMatch,
-    ThermodynamicConditions, Topology, analyze_orfs_with_status, analyze_primer,
-    find_primer_bindings_limited, find_sequence_matches, simulate_inverse_pcr as run_inverse_pcr,
+    DigestEnd, DigestError, DocumentDiagnostic, Feature, OpenReadingFrame, OrfAnalysisResult,
+    OrfTranslation, PcrOptions, PcrProduct, Primer, PrimerAnalysis, PrimerBinding, RestrictionCut,
+    SequenceDocument, SequenceMatch, SequenceSpan, ThermodynamicConditions, Topology,
+    analyze_orfs_with_status, analyze_primer, find_primer_bindings_limited, find_sequence_matches,
+    simulate_inverse_pcr as run_inverse_pcr,
     simulate_overlap_extension_pcr as run_overlap_extension_pcr, simulate_pcr as run_standard_pcr,
-    translate_open_reading_frame,
+    simulate_restriction_digest as run_restriction_digest, translate_open_reading_frame,
 };
 use dotdna_io::{SequenceFormat, parse_snapgene_named, parse_text_document, to_dotdna_project};
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,38 @@ struct PcrCommandRequest {
 struct PcrCommandResult {
     product: PcrProduct,
     document: DocumentSummary,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DigestCommandRequest {
+    template_id: String,
+    template_revision: u64,
+    document: SequenceDocument,
+    enzyme_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DigestCommandFragment {
+    index: usize,
+    source_spans: Vec<SequenceSpan>,
+    length: usize,
+    gc_percent: f64,
+    upstream_end: DigestEnd,
+    downstream_end: DigestEnd,
+    document: DocumentSummary,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DigestCommandResult {
+    template_id: String,
+    template_revision: u64,
+    enzyme_names: Vec<String>,
+    cuts: Vec<RestrictionCut>,
+    fragments: Vec<DigestCommandFragment>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -833,6 +866,95 @@ async fn simulate_pcr_product(
         })?
 }
 
+fn digest_command_error(error: &DigestError) -> CommandError {
+    match error {
+        DigestError::NoEnzymes => CommandError::new(
+            "enzymes-required",
+            error.to_string(),
+            "Select at least one enzyme with a complete cleavage site.",
+        ),
+        DigestError::InvalidTemplate => CommandError::new(
+            "double-stranded-template-required",
+            error.to_string(),
+            "Open a non-empty double-stranded DNA document before running a digest.",
+        ),
+        DigestError::UnknownEnzyme(_) => CommandError::new(
+            "unknown-enzyme",
+            error.to_string(),
+            "Choose an enzyme from the supported catalog instead of entering a free-form name.",
+        ),
+        DigestError::NoCuts => CommandError::new(
+            "no-valid-cuts",
+            error.to_string(),
+            "Choose an enzyme that cuts this template; Type IIS cleavage must also remain within both linear ends.",
+        ),
+        DigestError::TooManyCuts => CommandError::new(
+            "too-many-cuts",
+            error.to_string(),
+            "Choose a rarer cutter or a smaller enzyme set; DOTDNA will not create a truncated digest.",
+        ),
+        DigestError::ConflictingCuts(_) => CommandError::new(
+            "conflicting-cuts",
+            error.to_string(),
+            "Remove one of the enzymes that cleaves the same top-strand boundary with incompatible end chemistry.",
+        ),
+        DigestError::TooManyAnnotations => CommandError::new(
+            "too-many-projected-annotations",
+            error.to_string(),
+            "Hide or remove unneeded annotations, or choose a digest with fewer fragments.",
+        ),
+        DigestError::InvalidProduct => CommandError::new(
+            "invalid-digest-product",
+            error.to_string(),
+            "Resolve invalid source annotations before creating restriction fragments.",
+        ),
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Tauri deserializes command payloads into owned values.
+fn simulate_restriction_digest_blocking(
+    request: DigestCommandRequest,
+) -> Result<DigestCommandResult, CommandError> {
+    let digest = run_restriction_digest(&request.document, &request.enzyme_names)
+        .map_err(|error| digest_command_error(&error))?;
+    let fragments = digest
+        .fragments
+        .into_iter()
+        .map(|fragment| DigestCommandFragment {
+            index: fragment.index,
+            source_spans: fragment.source_spans,
+            length: fragment.length,
+            gc_percent: fragment.gc_percent,
+            upstream_end: fragment.upstream_end,
+            downstream_end: fragment.downstream_end,
+            document: DocumentSummary::new(None, "Restriction Fragment", fragment.document),
+        })
+        .collect();
+    Ok(DigestCommandResult {
+        template_id: request.template_id,
+        template_revision: request.template_revision,
+        enzyme_names: digest.enzyme_names,
+        cuts: digest.cuts,
+        fragments,
+        warnings: digest.warnings,
+    })
+}
+
+#[tauri::command]
+async fn simulate_restriction_digest(
+    request: DigestCommandRequest,
+) -> Result<DigestCommandResult, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || simulate_restriction_digest_blocking(request))
+        .await
+        .map_err(|error| {
+            CommandError::new(
+                "digest-worker-failed",
+                format!("The restriction-digest worker stopped unexpectedly: {error}"),
+                "Try the digest again or choose a smaller template and enzyme set.",
+            )
+        })?
+}
+
 fn analyze_document_primers_blocking(request: PrimerCheckRequest) -> Vec<PrimerCheckResult> {
     const MAX_INTERACTIVE_BINDINGS: usize = 100;
     request
@@ -1253,6 +1375,56 @@ fn build_view_submenu<R: tauri::Runtime>(
     )
 }
 
+fn build_actions_submenu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::menu::Submenu<R>> {
+    use tauri::menu::{MenuItem, PredefinedMenuItem, Submenu};
+
+    let pcr = MenuItem::with_id(app, "actions.pcr", "PCR…", false, None::<&str>)?;
+    let inverse_pcr = MenuItem::with_id(
+        app,
+        "actions.inverse-pcr",
+        "Inverse PCR…",
+        false,
+        None::<&str>,
+    )?;
+    let overlap_pcr = MenuItem::with_id(
+        app,
+        "actions.overlap-pcr",
+        "Overlap-Extension PCR…",
+        false,
+        None::<&str>,
+    )?;
+    let digest = MenuItem::with_id(
+        app,
+        "actions.restriction-digest",
+        "Restriction Digest…",
+        false,
+        None::<&str>,
+    )?;
+    let assembly = MenuItem::with_id(
+        app,
+        "actions.assembly",
+        "Assembly… (Planned)",
+        false,
+        None::<&str>,
+    )?;
+    Submenu::with_items(
+        app,
+        "Actions",
+        true,
+        &[
+            &pcr,
+            &inverse_pcr,
+            &overlap_pcr,
+            &PredefinedMenuItem::separator(app)?,
+            &digest,
+            &PredefinedMenuItem::separator(app)?,
+            &assembly,
+        ],
+    )
+}
+
 fn build_window_submenu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> tauri::Result<tauri::menu::Submenu<R>> {
@@ -1277,8 +1449,9 @@ fn build_app_menu<R: tauri::Runtime>(
     let file = build_file_submenu(app)?;
     let edit = build_edit_submenu(app)?;
     let view = build_view_submenu(app)?;
+    let actions = build_actions_submenu(app)?;
     let window = build_window_submenu(app)?;
-    tauri::menu::Menu::with_items(app, &[&application, &file, &edit, &view, &window])
+    tauri::menu::Menu::with_items(app, &[&application, &file, &edit, &view, &actions, &window])
 }
 
 fn native_menu_item<R: tauri::Runtime>(
@@ -1343,6 +1516,10 @@ fn update_native_menu_state(app: tauri::AppHandle, state: NativeMenuState) -> Re
         "edit.undo-document",
         "edit.redo-document",
         "view.command-palette",
+        "actions.pcr",
+        "actions.inverse-pcr",
+        "actions.overlap-pcr",
+        "actions.restriction-digest",
     ] {
         set_native_menu_enabled(&app, id, enabled.contains(id))?;
     }
@@ -1371,7 +1548,10 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.close();
                 }
-            } else if id.starts_with("file.") || id.starts_with("edit.") || id.starts_with("view.")
+            } else if id.starts_with("file.")
+                || id.starts_with("edit.")
+                || id.starts_with("view.")
+                || id.starts_with("actions.")
             {
                 let _ = app.emit("dotdna-menu", id);
             }
@@ -1384,6 +1564,7 @@ pub fn run() {
             create_document,
             import_sequence,
             simulate_pcr_product,
+            simulate_restriction_digest,
             analyze_document_primers,
             analyze_open_reading_frames,
             translate_selected_open_reading_frame,
@@ -1466,6 +1647,29 @@ mod tests {
             dotdna_core::Topology::Linear
         );
         assert!(!result.document.document.features.is_empty());
+    }
+
+    #[test]
+    fn native_boundary_returns_revision_keyed_digest_fragments() {
+        let mut document =
+            SequenceDocument::new("digest-template.dna", "AAAAGAATTCCCCCGGATCCAAAA").unwrap();
+        document.topology = Topology::Linear;
+        let result = simulate_restriction_digest_blocking(DigestCommandRequest {
+            template_id: "document-7".to_owned(),
+            template_revision: 12,
+            document,
+            enzyme_names: vec!["EcoRI".to_owned(), "BamHI".to_owned()],
+        })
+        .unwrap();
+
+        assert_eq!(result.template_id, "document-7");
+        assert_eq!(result.template_revision, 12);
+        assert_eq!(result.cuts.len(), 2);
+        assert_eq!(result.fragments.len(), 3);
+        assert!(result.fragments.iter().all(|fragment| {
+            fragment.document.document.topology == Topology::Linear
+                && fragment.document.document.validate().is_empty()
+        }));
     }
 
     #[test]

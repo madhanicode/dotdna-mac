@@ -184,6 +184,49 @@ export type PcrCommandResult = {
   document: DocumentSummary;
 };
 
+export type DigestEndType = "natural" | "blunt" | "five-prime" | "three-prime";
+
+export type DigestEnd = {
+  enzymeNames: string[];
+  endType: DigestEndType;
+  overhangSequence: string;
+  overhangLength: number;
+  overhangStrand: Strand;
+  topCutPosition: number | null;
+  bottomCutPosition: number | null;
+};
+
+export type RestrictionCut = {
+  enzymeNames: string[];
+  recognitionSequence: string;
+  recognitionSpans: SequenceSpan[];
+  strand: Strand;
+  topCutPosition: number;
+  bottomCutPosition: number;
+  endType: DigestEndType;
+  overhangSequence: string;
+  overhangLength: number;
+};
+
+export type DigestCommandFragment = {
+  index: number;
+  sourceSpans: SequenceSpan[];
+  length: number;
+  gcPercent: number;
+  upstreamEnd: DigestEnd;
+  downstreamEnd: DigestEnd;
+  document: DocumentSummary;
+};
+
+export type DigestCommandResult = {
+  templateId: string;
+  templateRevision: number;
+  enzymeNames: string[];
+  cuts: RestrictionCut[];
+  fragments: DigestCommandFragment[];
+  warnings: string[];
+};
+
 export type CommandError = {
   code: string;
   message: string;

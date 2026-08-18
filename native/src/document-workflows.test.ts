@@ -87,6 +87,7 @@ describe("document save workflows", () => {
       undo: true,
       redo: false,
       changeView: true,
+      molecularActions: true,
       activeView: "sequence",
     });
   });
@@ -103,7 +104,7 @@ describe("document save workflows", () => {
       closeBusy: false,
       activeView: "sequence",
     });
-    expect(state).toMatchObject({ newDocument: false, openDocument: false, openFolder: false, commandPalette: false, save: false, saveAs: false, undo: false, redo: false, changeView: false });
+    expect(state).toMatchObject({ newDocument: false, openDocument: false, openFolder: false, commandPalette: false, save: false, saveAs: false, undo: false, redo: false, changeView: false, molecularActions: false });
     expect(state.close).toBe(false);
   });
 
@@ -136,9 +137,10 @@ describe("document save workflows", () => {
       undo: true,
       redo: false,
       changeView: true,
+      molecularActions: true,
       activeView: "features",
     })).toEqual({
-      enabled: ["file.new", "file.open", "file.open-folder", "view.command-palette", "file.save-as", "file.close", "edit.undo-document", "view.map", "view.sequence", "view.features", "view.primers", "view.history"],
+      enabled: ["file.new", "file.open", "file.open-folder", "view.command-palette", "file.save-as", "file.close", "edit.undo-document", "actions.pcr", "actions.inverse-pcr", "actions.overlap-pcr", "actions.restriction-digest", "view.map", "view.sequence", "view.features", "view.primers", "view.history"],
       activeView: "features",
     });
   });

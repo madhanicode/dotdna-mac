@@ -26,6 +26,7 @@ describe("findRestrictionSites", () => {
   it("bounds repetitive-site materialization per enzyme and discloses truncation", () => {
     const scan = scanRestrictionSites("GAATTC".repeat(20), false, 3);
     expect(scan.truncated).toBe(true);
+    expect(scan.truncatedEnzymes).toEqual(["EcoRI"]);
     expect(scan.sites.filter(({ enzyme }) => enzyme === "EcoRI")).toHaveLength(3);
   });
 });
