@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import "pixi.js/unsafe-eval";
 import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
 import type { RestrictionSite } from "./restriction-sites";
+import type { SequenceSelection } from "./sequence-selection";
 import type { Feature, Topology } from "./types";
 
 type Props = {
@@ -10,14 +11,36 @@ type Props = {
   sequenceLength: number;
   features: Feature[];
   restrictionSites: RestrictionSite[];
+  restrictionSitesTruncated: boolean;
+  selection: SequenceSelection | null;
   selectedFeature: number | null;
   onSelectFeature: (index: number) => void;
+  onSelectRestrictionSite: (site: RestrictionSite) => void;
   zoom: number;
   showEnzymes: boolean;
 };
 
 const muted = 0x747982;
 const foreground = 0xd9dce1;
+const maximumMapRestrictionSites = 200;
+
+function selectionColor(selection: SequenceSelection) {
+  if (selection.source === "restriction") return 0xb99c50;
+  if (selection.source === "find") return 0x8b8fda;
+  if (selection.source === "orf") return 0x63a578;
+  return 0x65c5d2;
+}
+
+function addSiteLimitNote(scene: Container, props: Props, x: number, y: number) {
+  if (!props.showEnzymes || (props.restrictionSites.length <= maximumMapRestrictionSites && !props.restrictionSitesTruncated)) return;
+  const text = new Text({
+    text: `Map shows ${Math.min(maximumMapRestrictionSites, props.restrictionSites.length).toLocaleString()} of ${props.restrictionSites.length.toLocaleString()}${props.restrictionSitesTruncated ? "+" : ""} sites · use Enzymes to browse`,
+    style: new TextStyle({ fill: 0x8b7a4e, fontFamily: "SFMono-Regular, Menlo, monospace", fontSize: 8 }),
+  });
+  text.anchor.set(0.5, 1);
+  text.position.set(x, y);
+  scene.addChild(text);
+}
 
 function numericColor(value: string | null, fallback = 0x5cc8d7) {
   if (!value?.startsWith("#")) return fallback;
@@ -56,6 +79,15 @@ function drawCircular(scene: Container, props: Props, width: number, height: num
   }
   scene.addChild(grid);
   scene.addChild(new Graphics().circle(cx, cy, radius).stroke({ width: 10, color: 0x2e3237 }));
+
+  if (props.selection && props.selection.source !== "feature") {
+    const overlay = new Graphics();
+    for (const interval of props.selection.intervals) {
+      overlay.arc(cx, cy, radius - 1, angleFor(interval.start, props.sequenceLength), angleFor(interval.end, props.sequenceLength))
+        .stroke({ width: 5, color: selectionColor(props.selection), alpha: 0.95 });
+    }
+    scene.addChild(overlay);
+  }
 
   for (let tick = 0; tick < 12; tick += 1) {
     const angle = -Math.PI / 2 + tick / 12 * Math.PI * 2;
@@ -123,14 +155,20 @@ function drawCircular(scene: Container, props: Props, width: number, height: num
   });
 
   if (props.showEnzymes) {
-    props.restrictionSites.slice(0, 24).forEach((site, index) => {
+    props.restrictionSites.slice(0, maximumMapRestrictionSites).forEach((site, index) => {
       const angle = angleFor(site.position, props.sequenceLength);
       const inner = radius - 17;
       const outer = radius - 33 - (index % 2) * 10;
-      scene.addChild(new Graphics()
+      const marker = new Graphics()
         .moveTo(cx + Math.cos(angle) * inner, cy + Math.sin(angle) * inner)
         .lineTo(cx + Math.cos(angle) * outer, cy + Math.sin(angle) * outer)
-        .stroke({ width: 1.25, color: 0x7e858e, alpha: 0.9 }));
+        .stroke({ width: 2.25, color: 0x9b8a55, alpha: 0.95 })
+        .circle(cx + Math.cos(angle) * ((inner + outer) / 2), cy + Math.sin(angle) * ((inner + outer) / 2), 8)
+        .fill({ color: 0x9b8a55, alpha: 0.001 });
+      marker.eventMode = "static";
+      marker.cursor = "pointer";
+      marker.on("pointertap", () => props.onSelectRestrictionSite(site));
+      scene.addChild(marker);
       if (props.restrictionSites.length <= 8) {
         const enzymeLabel = new Text({
           text: `${site.enzyme} ${(site.position + 1).toLocaleString()}`,
@@ -138,11 +176,15 @@ function drawCircular(scene: Container, props: Props, width: number, height: num
         });
         enzymeLabel.anchor.set(Math.cos(angle) >= 0 ? 0 : 1, 0.5);
         enzymeLabel.position.set(cx + Math.cos(angle) * (outer - 4), cy + Math.sin(angle) * (outer - 4));
+        enzymeLabel.eventMode = "static";
+        enzymeLabel.cursor = "pointer";
+        enzymeLabel.on("pointertap", () => props.onSelectRestrictionSite(site));
         scene.addChild(enzymeLabel);
       }
     });
   }
   addTitle(scene, props.name, `${props.sequenceLength.toLocaleString()} bp · circular`, cx, cy);
+  addSiteLimitNote(scene, props, cx, height - 12);
 }
 
 function drawLinear(scene: Container, props: Props, width: number, height: number) {
@@ -151,6 +193,16 @@ function drawLinear(scene: Container, props: Props, width: number, height: numbe
   const startX = (width - availableWidth) / 2;
   const endX = startX + availableWidth;
   scene.addChild(new Graphics().moveTo(startX, centerY).lineTo(endX, centerY).stroke({ width: 8, color: 0x2e3237 }));
+
+  if (props.selection && props.selection.source !== "feature") {
+    const overlay = new Graphics();
+    for (const interval of props.selection.intervals) {
+      const x1 = startX + interval.start / Math.max(props.sequenceLength, 1) * availableWidth;
+      const x2 = startX + interval.end / Math.max(props.sequenceLength, 1) * availableWidth;
+      overlay.moveTo(x1, centerY).lineTo(x2, centerY).stroke({ width: 5, color: selectionColor(props.selection), alpha: 0.95 });
+    }
+    scene.addChild(overlay);
+  }
 
   for (let tick = 0; tick <= 10; tick += 1) {
     const x = startX + availableWidth * tick / 10;
@@ -188,18 +240,26 @@ function drawLinear(scene: Container, props: Props, width: number, height: numbe
   });
 
   if (props.showEnzymes) {
-    props.restrictionSites.slice(0, 24).forEach((site, index) => {
+    props.restrictionSites.slice(0, maximumMapRestrictionSites).forEach((site, index) => {
       const x = startX + site.position / Math.max(props.sequenceLength, 1) * availableWidth;
-      scene.addChild(new Graphics().moveTo(x, centerY + 8).lineTo(x, centerY + 23).stroke({ width: 1, color: 0x7e858e }));
+      const marker = new Graphics().moveTo(x, centerY + 8).lineTo(x, centerY + 23).stroke({ width: 2, color: 0x9b8a55 });
+      marker.eventMode = "static";
+      marker.cursor = "pointer";
+      marker.on("pointertap", () => props.onSelectRestrictionSite(site));
+      scene.addChild(marker);
       if (props.restrictionSites.length <= 8) {
         const label = new Text({ text: site.enzyme, style: new TextStyle({ fill: 0x858b93, fontFamily: "SFMono-Regular, Menlo, monospace", fontSize: 8 }) });
         label.anchor.set(0.5, 0);
         label.position.set(x, centerY + 25 + (index % 2) * 10);
+        label.eventMode = "static";
+        label.cursor = "pointer";
+        label.on("pointertap", () => props.onSelectRestrictionSite(site));
         scene.addChild(label);
       }
     });
   }
   addTitle(scene, props.name, `${props.sequenceLength.toLocaleString()} bp · linear`, width / 2, centerY + 86);
+  addSiteLimitNote(scene, props, width / 2, height - 12);
 }
 
 function redraw(application: Application, scene: Container, props: Props, host: HTMLDivElement) {
@@ -273,12 +333,14 @@ export function PlasmidMap(props: Props) {
   }, [props]);
 
   return (
-    <div className="pixi-map" ref={hostRef}>
-      <div className="sr-only" aria-label="Map features">
+    <div className="pixi-map">
+      <div className="pixi-canvas" ref={hostRef} />
+      <div className="sr-only map-keyboard-controls" aria-label="Map selections">
         {props.features.map((feature, index) => {
           const ranges = feature.segments.map((segment) => `${segment.span.start + 1} to ${segment.span.end}`).join(", ");
           return <button aria-pressed={props.selectedFeature === index} key={`${feature.name}-${index}`} onClick={() => props.onSelectFeature(index)}>{feature.name}, {feature.kind}, {feature.strand} strand, bases {ranges}</button>;
         })}
+        {props.restrictionSites.slice(0, maximumMapRestrictionSites).map((site) => <button key={`${site.enzyme}-${site.position}-${site.orientation}`} onClick={() => props.onSelectRestrictionSite(site)}>{site.enzyme}, {site.orientation} site, bases {site.intervals.map((interval) => `${interval.start + 1} to ${interval.end}`).join(", ")}</button>)}
       </div>
     </div>
   );

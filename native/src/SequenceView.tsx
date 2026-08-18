@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sequenceRow, visibleRowRange } from "./sequence-layout";
+import { displayIntervals, intervalContains, type SequenceSelection } from "./sequence-selection";
+import type { OrfTranslation, SequenceSpan, TranslatedCodon } from "./types";
 
 type Props = {
   sequence: string;
@@ -7,20 +9,82 @@ type Props = {
   disabled?: boolean;
   onApply: (sequence: string) => Promise<void>;
   onDraftStateChange?: (dirty: boolean) => void;
+  selection?: SequenceSelection | null;
+  secondaryIntervals?: SequenceSpan[];
+  translation?: OrfTranslation | null;
 };
 
-const rowHeight = 46;
 const lineLength = 60;
 
-function Bases({ value, monochrome }: { value: string; monochrome: boolean }) {
+function Bases({ value, start, monochrome, selection, secondaryIntervals, strand, sequenceLength }: {
+  value: string;
+  start: number;
+  monochrome: boolean;
+  selection: SequenceSelection | null;
+  secondaryIntervals: SequenceSpan[];
+  strand: "forward" | "reverse";
+  sequenceLength: number;
+}) {
+  const cutPosition = strand === "forward" ? selection?.cutPositions?.top : selection?.cutPositions?.bottom;
   return (
     <span className={monochrome ? "bases monochrome" : "bases"}>
-      {[...value].map((base, index) => <span className={`base base-${base}`} key={`${index}-${base}`}>{base}</span>)}
+      {[...value].map((base, index) => {
+        const position = start + index;
+        const selected = selection ? intervalContains(selection.intervals, position) : false;
+        const secondary = !selected && sortedIntervalContains(secondaryIntervals, position);
+        const cutBefore = cutPosition === position || (cutPosition === 0 && position === 0);
+        const cutAfter = cutPosition === sequenceLength && position === sequenceLength - 1;
+        const classes = [
+          "base",
+          `base-${base}`,
+          selected ? `selected selection-${selection?.source}` : "",
+          secondary ? "secondary-match" : "",
+          cutBefore ? "cut-before" : "",
+          cutAfter ? "cut-after" : "",
+        ].filter(Boolean).join(" ");
+        return <span className={classes} aria-selected={selected || undefined} key={`${position}-${base}`}>{base}</span>;
+      })}
     </span>
   );
 }
 
-export function SequenceView({ sequence, monochrome, disabled = false, onApply, onDraftStateChange }: Props) {
+function sortedIntervalContains(intervals: SequenceSpan[], position: number) {
+  let low = 0;
+  let high = intervals.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const interval = intervals[middle];
+    if (position < interval.start) high = middle - 1;
+    else if (position >= interval.end) low = middle + 1;
+    else return true;
+  }
+  return false;
+}
+
+function mergeIntervals(intervals: SequenceSpan[]) {
+  const sorted = intervals.filter(({ start, end }) => end > start).sort((left, right) => left.start - right.start || left.end - right.end);
+  const merged: SequenceSpan[] = [];
+  for (const interval of sorted) {
+    const previous = merged.at(-1);
+    if (previous && interval.start <= previous.end) previous.end = Math.max(previous.end, interval.end);
+    else merged.push({ ...interval });
+  }
+  return merged;
+}
+
+function TranslationTrack({ rowStart, rowEnd, codons, translation }: { rowStart: number; rowEnd: number; codons: Map<number, TranslatedCodon>; translation: OrfTranslation }) {
+  const direction = translation.strand === "reverse" ? "←" : "→";
+  const frame = translation.frame > 0 ? `+${translation.frame}` : translation.frame;
+  return <span className="translation-track" data-label={`${frame} ${direction}`} aria-label={`ORF amino-acid translation, frame ${frame}, ${translation.strand} strand`}>
+    {Array.from({ length: rowEnd - rowStart }, (_, offset) => {
+      const position = rowStart + offset;
+      const codon = codons.get(position);
+      return <span className={codon ? `codon codon-${codon.kind}` : "codon"} key={position} title={codon ? `${codon.aminoAcid} at base ${position + 1}` : undefined}>{codon?.aminoAcid ?? ""}</span>;
+    })}
+  </span>;
+}
+
+export function SequenceView({ sequence, monochrome, disabled = false, onApply, onDraftStateChange, selection = null, secondaryIntervals = [], translation = null }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(580);
@@ -30,12 +94,15 @@ export function SequenceView({ sequence, monochrome, disabled = false, onApply, 
   const [applying, setApplying] = useState(false);
   const draftStateCallbackRef = useRef(onDraftStateChange);
   draftStateCallbackRef.current = onDraftStateChange;
+  const rowHeight = translation ? 62 : 46;
   const totalRows = Math.ceil(sequence.length / lineLength);
   const range = visibleRowRange(scrollTop, viewportHeight, totalRows, rowHeight);
   const rows = useMemo(
     () => Array.from({ length: range.last - range.first }, (_, offset) => sequenceRow(sequence, range.first + offset, lineLength)),
     [range.first, range.last, sequence],
   );
+  const mergedSecondaryIntervals = useMemo(() => mergeIntervals(secondaryIntervals), [secondaryIntervals]);
+  const translatedCodons = useMemo(() => new Map(translation?.codons.map((codon) => [codon.center, codon]) ?? []), [translation]);
 
   useEffect(() => {
     const viewport = scrollRef.current;
@@ -45,6 +112,16 @@ export function SequenceView({ sequence, monochrome, disabled = false, onApply, 
     observer.observe(viewport);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    const viewport = scrollRef.current;
+    const revealStart = selection?.intervals[0]?.start;
+    if (!viewport || revealStart === undefined || editing) return;
+    const targetRow = Math.floor(revealStart / lineLength);
+    const top = Math.max(0, targetRow * rowHeight - viewport.clientHeight / 2 + rowHeight / 2);
+    viewport.scrollTo({ top, behavior: "auto" });
+    setScrollTop(top);
+  }, [editing, rowHeight, selection?.entityId, selection?.revealToken]);
 
   useEffect(() => {
     if (!editing) setDraft(sequence);
@@ -87,13 +164,18 @@ export function SequenceView({ sequence, monochrome, disabled = false, onApply, 
   }
 
   return (
-    <div className="sequence-view">
+    <div className={`sequence-view${selection && !editing ? " has-selection" : ""}`}>
       <div className="sequence-ruler">
         <span>5′</span>
         <div><i>10</i><i>20</i><i>30</i><i>40</i><i>50</i><i>60</i></div>
         <span>3′</span>
         <button disabled={disabled} title={disabled ? "Wait for the current edit or save to finish." : undefined} onClick={() => { setDraft(sequence); setEditError(null); setEditing(true); }}>Edit Sequence…</button>
       </div>
+      {selection && !editing && <div className={`sequence-selection-banner selection-${selection.source}`} role="status" aria-live="polite">
+        <strong>{selection.label}</strong>
+        <span className="mono">{displayIntervals(selection.intervals)} · {selection.strand}</span>
+        {selection.detail && <em>{selection.detail}</em>}
+      </div>}
       {editing ? <div className="sequence-edit-pane">
         <header><strong>Direct sequence edit</strong><span>Coordinates after the changed interval will shift; overlapping annotations will resize.</span></header>
         <textarea autoFocus spellCheck={false} value={draft} onChange={(event) => setDraft(event.target.value)} aria-label="Editable DNA sequence" />
@@ -111,8 +193,9 @@ export function SequenceView({ sequence, monochrome, disabled = false, onApply, 
             <div className="sequence-row" key={row.index} style={{ top: row.index * rowHeight }}>
               <span className="sequence-coordinate">{(row.start + 1).toLocaleString()}</span>
               <div className="sequence-strands">
-                <Bases value={row.forward} monochrome={monochrome} />
-                <Bases value={row.complement} monochrome={monochrome} />
+                <Bases value={row.forward} start={row.start} monochrome={monochrome} selection={selection} secondaryIntervals={mergedSecondaryIntervals} strand="forward" sequenceLength={sequence.length} />
+                {translation && <TranslationTrack rowStart={row.start} rowEnd={row.end} codons={translatedCodons} translation={translation} />}
+                <Bases value={row.complement} start={row.start} monochrome={monochrome} selection={selection} secondaryIntervals={mergedSecondaryIntervals} strand="reverse" sequenceLength={sequence.length} />
               </div>
               <span className="sequence-coordinate end">{row.end.toLocaleString()}</span>
             </div>

@@ -2,12 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import type { ComponentProps } from "react";
 import { demoDocument } from "./demo";
 import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nativeMenuPayload, nativeMenuState, nextUntitledName } from "./document-workflows";
-import { findRestrictionSites, type RestrictionSite } from "./restriction-sites";
+import { scanRestrictionSites, type RestrictionSite } from "./restriction-sites";
 import { SequenceView } from "./SequenceView";
-import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, PcrCommandResult, PrimerCheck, SequenceDocument } from "./types";
+import { displayIntervals, normalizeIntervals, selectionLength, validateFindQuery, type SequenceMatch, type SequenceSelection } from "./sequence-selection";
+import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, OpenReadingFrame, OrfTranslation, PcrCommandResult, PrimerCheck, SequenceDocument } from "./types";
 
 const PlasmidMap = lazy(() => import("./PlasmidMap").then((module) => ({ default: module.PlasmidMap })));
 
@@ -19,13 +21,13 @@ const views: Array<{ id: DocumentView; label: string; shortcut: string }> = [
   { id: "history", label: "History", shortcut: "⌘5" },
 ];
 
-const bottomViews = ["Map Controls", "Enzymes", "Warnings"] as const;
+const bottomViews = ["Map Controls", "Find", "Enzymes", "ORFs", "Warnings"] as const;
 type BottomView = typeof bottomViews[number];
 const bottomNavigation: Array<{ label: string; view?: BottomView; reason?: string }> = [
   { label: "Map Controls", view: "Map Controls" },
-  { label: "Find", reason: "Sequence Find is planned but not implemented yet." },
+  { label: "Find", view: "Find" },
   { label: "Enzymes", view: "Enzymes" },
-  { label: "ORFs", reason: "ORF analysis is planned but not implemented yet." },
+  { label: "ORFs", view: "ORFs" },
   { label: "Warnings", view: "Warnings" },
 ];
 type Workflow = "PCR" | "Inverse PCR" | "Overlap-Extension PCR" | null;
@@ -33,6 +35,11 @@ type Diagnostic = { level: "warn" | "error"; title: string; body: string };
 type EditHistory = { undo: OpenDocument[]; redo: OpenDocument[] };
 type CloseRequest = { kind: "document"; id: string } | { kind: "quit" };
 type SavePathResolution = { path: string; fileVersion: string | null };
+type OrfAnalysisState = { revision: number; minimumAminoAcids: number; loading: boolean; error: string | null; truncated: boolean; items: OpenReadingFrame[] };
+type OrfAnalysisResponse = { orfs: OpenReadingFrame[]; truncated: boolean };
+type FindAnalysisState = { revision: number; query: string; loading: boolean; error: string | null; capped: boolean; matches: SequenceMatch[] };
+
+const MAX_FIND_MATCHES = 50_000;
 
 const MAX_EDIT_HISTORY_ENTRIES = 32;
 const MAX_EDIT_HISTORY_BASES = 2_000_000;
@@ -57,6 +64,11 @@ function documentId(summary: DocumentSummary) {
 
 function asOpenDocument(summary: DocumentSummary): OpenDocument {
   return { ...summary, id: documentId(summary), dirty: false, view: "map", revision: 0 };
+}
+
+function cutBoundaryLabel(position: number | null) {
+  if (position === null) return "Outside molecule";
+  return position === 0 ? "Before base 1" : `After base ${position.toLocaleString()}`;
 }
 
 function Icon({ name }: { name: string }) {
@@ -174,13 +186,27 @@ function HistoryView({ document }: { document: OpenDocument }) {
   );
 }
 
-function Inspector({ active, selectedFeature }: { active: OpenDocument | null; selectedFeature: number | null }) {
-  const feature = active && selectedFeature !== null ? active.document.features[selectedFeature] : null;
+function Inspector({ active, selectedFeature, selection }: { active: OpenDocument | null; selectedFeature: number | null; selection: SequenceSelection | null }) {
+  const feature = active && selectedFeature !== null && (!selection || selection.source === "feature") ? active.document.features[selectedFeature] : null;
   if (!active) return <aside className="inspector"><header>INSPECTOR</header><p className="empty-note">Nothing selected</p></aside>;
   return (
     <aside className="inspector">
       <header><span>INSPECTOR</span></header>
-      {feature ? (
+      {selection && selection.source !== "feature" ? (
+        <>
+          <section className="inspector-hero">
+            <i className={`selection-swatch selection-${selection.source}`} />
+            <div><small>{selection.source.toUpperCase()}</small><strong>{selection.label}</strong><span>{selection.detail ?? `${selectionLength(selection).toLocaleString()} bp selected`}</span></div>
+          </section>
+          <section className="property-list">
+            <div><span>Range</span><strong className="mono">{displayIntervals(selection.intervals)}</strong></div>
+            <div><span>Length</span><strong className="mono">{selectionLength(selection).toLocaleString()} bp</strong></div>
+            <div><span>Direction</span><strong>{selection.strand}</strong></div>
+            <div><span>Origin</span><strong>{selection.wrapsOrigin ? "Crosses origin" : "Does not cross"}</strong></div>
+            {selection.cutPositions && <><div><span>Top cut</span><strong className="mono">{cutBoundaryLabel(selection.cutPositions.top)}</strong></div><div><span>Bottom cut</span><strong className="mono">{cutBoundaryLabel(selection.cutPositions.bottom)}</strong></div></>}
+          </section>
+        </>
+      ) : feature ? (
         <>
           <section className="inspector-hero">
             <i style={{ background: feature.color ?? "#5cc8d7" }} />
@@ -215,11 +241,86 @@ function Inspector({ active, selectedFeature }: { active: OpenDocument | null; s
   );
 }
 
-function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setShowEnzymes, primerChecks, restrictionSites, diagnostics }: {
+function FindPanel({ query, validationError, loading, count, capped, index, focusToken, onQueryChange, onMove, onClose }: {
+  query: string;
+  validationError: string | null;
+  loading: boolean;
+  count: number;
+  capped: boolean;
+  index: number;
+  focusToken: number;
+  onQueryChange: (query: string) => void;
+  onMove: (direction: 1 | -1) => void;
+  onClose: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { inputRef.current?.focus(); inputRef.current?.select(); }, [focusToken]);
+  return <div className="find-panel">
+    <label><span>DNA / IUPAC sequence</span><input ref={inputRef} spellCheck={false} value={query} onChange={(event) => onQueryChange(event.target.value)} onKeyDown={(event) => {
+      if (event.key === "Enter") { event.preventDefault(); onMove(event.shiftKey ? -1 : 1); }
+      else if (event.key === "Escape") { event.preventDefault(); onClose(); }
+    }} placeholder="Find sequence…" aria-invalid={Boolean(validationError)} aria-describedby="find-help" /></label>
+    <button disabled={!count} onClick={() => onMove(-1)} aria-label="Previous match">↑</button>
+    <button disabled={!count} onClick={() => onMove(1)} aria-label="Next match">↓</button>
+    <strong className="mono" aria-live="polite">{validationError ? "Search unavailable" : loading ? "Searching both strands…" : count ? `${Math.min(index + 1, count).toLocaleString()} of ${count.toLocaleString()}${capped ? "+" : ""}` : query ? "No matches" : "Enter a sequence"}</strong>
+    <span id="find-help" role={validationError ? "alert" : undefined}>{validationError ?? "Enter / Shift-Enter moves between overlapping matches. DNA ambiguity codes are supported."}</span>
+    <button className="find-close" onClick={onClose} aria-label="Close Find">×</button>
+  </div>;
+}
+
+function OrfPanel({ documentId, state, selectedId, showTranslation, onMinimumChange, onRefresh, onSelect, onShowTranslation }: {
+  documentId: string | null;
+  state: OrfAnalysisState | null;
+  selectedId: string | null;
+  showTranslation: boolean;
+  onMinimumChange: (minimum: number) => void;
+  onRefresh: () => void;
+  onSelect: (orf: OpenReadingFrame) => void;
+  onShowTranslation: (show: boolean) => void;
+}) {
+  const items = state?.items ?? [];
+  const [page, setPage] = useState(0);
+  const pageSize = 200;
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const visibleItems = items.slice(page * pageSize, (page + 1) * pageSize);
+  useEffect(() => setPage(0), [documentId, state?.revision, state?.minimumAminoAcids]);
+  useEffect(() => setPage((current) => Math.min(current, pageCount - 1)), [pageCount]);
+  return <div className="orf-panel">
+    <header>
+      <label><span>Minimum ORF</span><select value={state?.minimumAminoAcids ?? 20} onChange={(event) => onMinimumChange(Number(event.target.value))}><option value="10">10 aa</option><option value="20">20 aa</option><option value="50">50 aa</option><option value="100">100 aa</option></select></label>
+      <label className="switch-label"><input checked={showTranslation} onChange={(event) => onShowTranslation(event.target.checked)} type="checkbox" /><i /><span>Selected translation track</span></label>
+      <button disabled={state?.loading} onClick={onRefresh}>{state?.loading ? "Analyzing…" : "Refresh"}</button>
+      <strong aria-live="polite">{state?.loading ? "Scanning all six reading frames…" : `${items.length.toLocaleString()}${state?.truncated ? "+" : ""} complete ORFs`}</strong>
+      <button disabled={page === 0 || state?.loading} onClick={() => setPage((current) => Math.max(0, current - 1))}>Previous</button><em>Page {page + 1} of {pageCount}</em><button disabled={page + 1 >= pageCount || state?.loading} onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))}>Next</button>
+    </header>
+    {state?.error ? <div className="orf-error"><strong>ORF analysis could not run</strong><span>{state.error}</span></div> : items.length ? <div className={`orf-results${state?.truncated ? " has-note" : ""}`}>{state?.truncated && <div className="orf-limit-note">Results reached the balanced per-frame safety limit; every reading frame was scanned, but additional repetitive ORFs are omitted.</div>}<div className="orf-list" role="listbox" aria-label="Open reading frames" onKeyDown={(event) => {
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      const options = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button[role=option]")];
+      const current = options.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : Math.max(0, Math.min(options.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)));
+      event.preventDefault();
+      options[next]?.focus();
+    }}>{visibleItems.map((orf) => <button aria-selected={selectedId === orf.id} className={selectedId === orf.id ? "selected" : ""} key={orf.id} onClick={() => onSelect(orf)} role="option">
+      <b>{orf.frame > 0 ? `+${orf.frame}` : orf.frame}</b><span className="mono">{displayIntervals(orf.intervals)}</span><span>{orf.aminoAcidLength.toLocaleString()} aa</span><em>{orf.wrapsOrigin ? "origin-spanning" : orf.strand}</em>
+    </button>)}</div></div> : !state?.loading && <div className="empty-note">No complete start-to-stop ORFs meet this length. Lower the minimum or review ambiguous bases.</div>}
+  </div>;
+}
+
+function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setShowEnzymes, primerChecks, restrictionSites, restrictionSitesTruncated, selectedRestrictionId, diagnostics, onSelectRestrictionSite, findProps, orfProps }: {
   view: BottomView; active: OpenDocument | null; setView: (view: BottomView) => void; zoom: number; setZoom: (value: number) => void;
   showEnzymes: boolean; setShowEnzymes: (value: boolean) => void;
   primerChecks: PrimerCheck[]; restrictionSites: RestrictionSite[]; diagnostics: Diagnostic[];
+  restrictionSitesTruncated: boolean;
+  selectedRestrictionId: string | null;
+  onSelectRestrictionSite: (site: RestrictionSite) => void;
+  findProps: ComponentProps<typeof FindPanel>;
+  orfProps: ComponentProps<typeof OrfPanel>;
 }) {
+  const [enzymePage, setEnzymePage] = useState(0);
+  const enzymePageSize = 120;
+  const enzymePageCount = Math.max(1, Math.ceil(restrictionSites.length / enzymePageSize));
+  const visibleRestrictionSites = restrictionSites.slice(enzymePage * enzymePageSize, (enzymePage + 1) * enzymePageSize);
+  useEffect(() => setEnzymePage(0), [active?.id, restrictionSites.length]);
   const warnings = !active ? [] : [
     ...(active.unknownBases ? [{ level: "warn", title: `${active.unknownBases} ambiguous bases`, body: "Confirm these positions before primer design or translation." }] : []),
     ...active.diagnostics.map((item) => ({ level: item.severity === "error" ? "error" : "warn", title: item.message, body: item.action })),
@@ -229,7 +330,11 @@ function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setSho
 
   return (
     <section className="bottom-panel">
-      <nav>{bottomNavigation.map((item) => <button className={view === item.view ? "active" : ""} disabled={!item.view} key={item.label} onClick={() => item.view && setView(item.view)} title={item.reason}>{item.label}{item.label === "Warnings" && warnings.length > 0 ? <b>{warnings.length}</b> : null}</button>)}</nav>
+      <nav>{bottomNavigation.map((item) => {
+        const requiresDocument = item.label === "Find" || item.label === "Enzymes" || item.label === "ORFs";
+        const disabled = !item.view || (requiresDocument && !active);
+        return <button className={view === item.view ? "active" : ""} disabled={disabled} key={item.label} onClick={() => item.view && setView(item.view)} title={disabled && requiresDocument ? "Open a DNA document first." : item.reason}>{item.label}{item.label === "Warnings" && warnings.length > 0 ? <b>{warnings.length}</b> : null}</button>;
+      })}</nav>
       <div className="bottom-content">
         {view === "Map Controls" && <div className="map-control-row">
           <label><span>Map zoom</span><input type="range" min="0.72" max="1.18" step="0.02" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
@@ -237,7 +342,12 @@ function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setSho
           <label className="switch-label unavailable" title="Feature-label display controls are planned but not implemented yet."><input defaultChecked disabled type="checkbox" /><i /><span>Feature labels</span></label>
           <label className="switch-label unavailable" title="Primer-site display controls are planned but not implemented yet."><input defaultChecked disabled type="checkbox" /><i /><span>Primer sites</span></label>
         </div>}
-        {view === "Enzymes" && (restrictionSites.length ? <div className="enzyme-grid">{restrictionSites.map((site) => <div className="enzyme-site" key={`${site.enzyme}-${site.position}`}>{site.enzyme} <span className="mono">{(site.position + 1).toLocaleString()}</span></div>)}</div> : <div className="empty-note">No sites for the six common enzymes in the active sequence.</div>)}
+        {view === "Find" && <FindPanel {...findProps} />}
+        {view === "Enzymes" && (restrictionSites.length ? <div className="enzyme-browser"><header><strong>{restrictionSites.length.toLocaleString()}{restrictionSitesTruncated ? "+" : ""} common-enzyme sites</strong>{restrictionSitesTruncated && <span>Repetitive hits are capped at 1,000 per enzyme. Use Find with the recognition sequence to inspect additional matches.</span>}<button disabled={enzymePage === 0} onClick={() => setEnzymePage((page) => Math.max(0, page - 1))}>Previous</button><em>Page {enzymePage + 1} of {enzymePageCount}</em><button disabled={enzymePage + 1 >= enzymePageCount} onClick={() => setEnzymePage((page) => Math.min(enzymePageCount - 1, page + 1))}>Next</button></header><div className="enzyme-grid">{visibleRestrictionSites.map((site) => {
+          const entityId = `restriction:${site.enzyme}:${site.position}:${site.orientation}`;
+          return <button aria-pressed={selectedRestrictionId === entityId} className={`enzyme-site${selectedRestrictionId === entityId ? " selected" : ""}`} key={`${site.enzyme}-${site.position}-${site.orientation}`} onClick={() => onSelectRestrictionSite(site)}><strong>{site.enzyme}</strong><span className="mono">{site.orientation === "reverse" ? "←" : "→"} {(site.position + 1).toLocaleString()}</span><small>{site.recognitionSequence}</small></button>;
+        })}</div></div> : <div className="empty-note">No sites for the six common enzymes in the active sequence.</div>)}
+        {view === "ORFs" && <OrfPanel {...orfProps} />}
         {view === "Warnings" && (warnings.length ? <div className="warning-list">{warnings.map((warning, index) => <article className={warning.level} key={`${warning.title}-${index}`}><span>!</span><div><strong>{warning.title}</strong><p>{warning.body}</p></div></article>)}</div> : <div className="empty-note">No current diagnostics. PCR workflows perform separate 3′ binding and thermodynamic checks.</div>)}
       </div>
     </section>
@@ -461,6 +571,14 @@ export default function App() {
   const [bottomOpen, setBottomOpen] = useState(true);
   const [bottomView, setBottomView] = useState<BottomView>("Map Controls");
   const [selectedFeatures, setSelectedFeatures] = useState<Record<string, number | null>>({ [documents[0].id]: 4 });
+  const [sequenceSelections, setSequenceSelections] = useState<Record<string, SequenceSelection | null>>({});
+  const [findQueries, setFindQueries] = useState<Record<string, string>>({});
+  const [findIndices, setFindIndices] = useState<Record<string, number>>({});
+  const [findAnalyses, setFindAnalyses] = useState<Record<string, FindAnalysisState>>({});
+  const [findFocusToken, setFindFocusToken] = useState(0);
+  const [orfAnalyses, setOrfAnalyses] = useState<Record<string, OrfAnalysisState>>({});
+  const [orfTranslations, setOrfTranslations] = useState<Record<string, OrfTranslation | null>>({});
+  const [showTranslations, setShowTranslations] = useState<Record<string, boolean>>({});
   const [projectSearch, setProjectSearch] = useState("");
   const [status, setStatus] = useState("Ready");
   const [monochrome, setMonochrome] = useState(false);
@@ -488,11 +606,19 @@ export default function App() {
   const reservedSavePathsRef = useRef<Map<string, string>>(new Map());
   const newDocumentOpenRef = useRef(newDocumentOpen);
   const workflowRef = useRef(workflow);
+  const revealTokenRef = useRef(0);
+  const orfRequestTokensRef = useRef<Record<string, number>>({});
+  const orfTranslationTokensRef = useRef<Record<string, number>>({});
+  const findRequestTokensRef = useRef<Record<string, number>>({});
+  const findInFlightRef = useRef<Set<string>>(new Set());
+  const findQueuedRunsRef = useRef<Record<string, (() => void) | undefined>>({});
   newDocumentOpenRef.current = newDocumentOpen;
   workflowRef.current = workflow;
 
   const active = documents.find((document) => document.id === activeId) ?? null;
   const selectedFeature = active ? selectedFeatures[active.id] ?? null : null;
+  const storedSelection = active ? sequenceSelections[active.id] ?? null : null;
+  const activeSelection = active && storedSelection?.revision === active.revision ? storedSelection : null;
   const activeBusy = active ? pendingEditIds.has(active.id) || pendingSaveIds.has(active.id) : false;
   const activeCanSave = canSaveDocument(active, activeBusy);
   const canUndo = active ? !activeBusy && (editHistories[active.id]?.undo.length ?? 0) > 0 : false;
@@ -509,15 +635,216 @@ export default function App() {
     activeView: active?.view ?? null,
   });
   const filteredDocuments = useMemo(() => documents.filter((document) => document.document.name.toLowerCase().includes(projectSearch.toLowerCase())), [documents, projectSearch]);
-  const restrictionSites = useMemo(() => active ? findRestrictionSites(active.document.sequence, active.document.topology === "circular") : [], [active]);
-  const selectFeature = useCallback((index: number) => {
-    if (activeId) setSelectedFeatures((current) => ({ ...current, [activeId]: index }));
-  }, [activeId]);
+  const restrictionScan = useMemo(() => active ? scanRestrictionSites(active.document.sequence, active.document.topology === "circular") : { sites: [], truncated: false }, [active?.document.sequence, active?.document.topology]);
+  const restrictionSites = restrictionScan.sites;
+  const findQuery = active ? findQueries[active.id] ?? "" : "";
+  const findValidation = useMemo(() => validateFindQuery(findQuery), [findQuery]);
+  const activeFindAnalysis = active ? findAnalyses[active.id] ?? null : null;
+  const visibleFindAnalysis = active && activeFindAnalysis?.revision === active.revision && activeFindAnalysis.query === findQuery ? activeFindAnalysis : null;
+  const findMatches = visibleFindAnalysis?.matches ?? [];
+  const findIndex = active ? Math.min(findIndices[active.id] ?? 0, Math.max(findMatches.length - 1, 0)) : 0;
+  const secondaryFindIntervals = useMemo(() => findMatches.flatMap((match) => match.intervals), [findMatches]);
+  const activeOrfState = active ? orfAnalyses[active.id] ?? null : null;
+  const selectedOrf = activeSelection?.source === "orf" && active && activeOrfState && activeOrfState.revision === active.revision
+    ? activeOrfState.items.find((orf) => orf.id === activeSelection.entityId.replace(/^orf:/, "")) ?? null
+    : null;
+  const storedTranslation = active ? orfTranslations[active.id] ?? null : null;
+  const activeTranslation = active && showTranslations[active.id] && selectedOrf && storedTranslation?.orfId === selectedOrf.id ? storedTranslation : null;
+
+  function revealSelection(document: OpenDocument, selection: Omit<SequenceSelection, "documentId" | "revision" | "revealToken">) {
+    if (selection.source !== "find") {
+      findRequestTokensRef.current[document.id] = (findRequestTokensRef.current[document.id] ?? 0) + 1;
+    }
+    if (selection.source !== "orf") {
+      orfTranslationTokensRef.current[document.id] = (orfTranslationTokensRef.current[document.id] ?? 0) + 1;
+      setOrfTranslations((current) => ({ ...current, [document.id]: null }));
+    }
+    const nextSelection: SequenceSelection = {
+      ...selection,
+      documentId: document.id,
+      revision: document.revision,
+      revealToken: ++revealTokenRef.current,
+    };
+    setSequenceSelections((current) => ({ ...current, [document.id]: nextSelection }));
+    updateDocuments((current) => current.map((item) => item.id === document.id ? { ...item, view: "sequence" } : item));
+    setActiveId(document.id);
+    return nextSelection;
+  }
+
+  function selectFeature(index: number) {
+    if (!active) return;
+    const feature = active.document.features[index];
+    if (!feature) return;
+    const intervals = normalizeIntervals(feature.segments.map((segment) => segment.span), active.length);
+    setSelectedFeatures((current) => ({ ...current, [active.id]: index }));
+    const selection = revealSelection(active, {
+      source: "feature",
+      entityId: `feature:${index}:${feature.name}`,
+      label: feature.name,
+      intervals,
+      strand: feature.strand,
+      wrapsOrigin: active.document.topology === "circular" && intervals.some(({ start }) => start === 0) && intervals.some(({ end }) => end === active.length),
+      color: feature.color,
+      detail: `${feature.kind} · ${intervals.reduce((sum, interval) => sum + interval.end - interval.start, 0).toLocaleString()} bp`,
+    });
+    setStatus(`Selected ${feature.name} · ${displayIntervals(selection.intervals)} · ${feature.strand}`);
+  }
+
+  function selectRestrictionSite(site: RestrictionSite) {
+    if (!active) return;
+    setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    const selection = revealSelection(active, {
+      source: "restriction",
+      entityId: `restriction:${site.enzyme}:${site.position}:${site.orientation}`,
+      label: `${site.enzyme} · ${site.recognitionSequence}`,
+      intervals: site.intervals,
+      strand: site.orientation,
+      wrapsOrigin: site.wrapsOrigin,
+      detail: `${site.orientation} recognition site · cut boundaries shown in gold`,
+      cutPositions: { top: site.topCutPosition, bottom: site.bottomCutPosition },
+    });
+    setStatus(`${site.enzyme} site at ${displayIntervals(selection.intervals)} · top ${cutBoundaryLabel(site.topCutPosition)}, bottom ${cutBoundaryLabel(site.bottomCutPosition)}`);
+  }
+
+  function selectFindMatch(index: number, matches = findMatches, query = findQuery) {
+    if (!active || !matches.length) return;
+    const normalizedIndex = ((index % matches.length) + matches.length) % matches.length;
+    const match = matches[normalizedIndex];
+    setFindIndices((current) => ({ ...current, [active.id]: normalizedIndex }));
+    setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    revealSelection(active, {
+      source: "find",
+      entityId: `find:${query.toUpperCase()}:${match.start}`,
+      label: `Find “${query}”`,
+      intervals: match.intervals,
+      strand: match.strand,
+      wrapsOrigin: match.wrapsOrigin,
+      detail: `Match ${normalizedIndex + 1} of ${matches.length}${visibleFindAnalysis?.capped ? "+" : ""} · ${match.strand} strand`,
+    });
+    setStatus(`Find match ${normalizedIndex + 1} of ${matches.length}${visibleFindAnalysis?.capped ? "+" : ""} · ${match.strand} strand · ${displayIntervals(match.intervals)}`);
+  }
+
+  function changeFindQuery(query: string) {
+    if (!active) return;
+    setFindQueries((current) => ({ ...current, [active.id]: query }));
+    setFindIndices((current) => ({ ...current, [active.id]: 0 }));
+    setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setSequenceSelections((current) => ({ ...current, [active.id]: null }));
+    orfTranslationTokensRef.current[active.id] = (orfTranslationTokensRef.current[active.id] ?? 0) + 1;
+    setOrfTranslations((current) => ({ ...current, [active.id]: null }));
+    const validation = validateFindQuery(query);
+    setStatus(validation.error ?? (query ? `Searching both strands for “${query}”…` : "Find sequence"));
+  }
+
+  function moveFind(direction: 1 | -1) {
+    if (!findMatches.length) return;
+    const next = (findIndex + direction + findMatches.length) % findMatches.length;
+    selectFindMatch(next);
+  }
+
+  function openFind() {
+    if (!active) return;
+    setActiveView("sequence");
+    setBottomOpen(true);
+    setBottomView("Find");
+    setFindFocusToken((token) => token + 1);
+    if (findMatches.length) selectFindMatch(findIndex);
+  }
+
+  async function analyzeOrfs(document: OpenDocument, minimumAminoAcids: number, force = false) {
+    const existing = orfAnalyses[document.id];
+    if (!force && existing?.revision === document.revision && existing.minimumAminoAcids === minimumAminoAcids) return;
+    const requestToken = (orfRequestTokensRef.current[document.id] ?? 0) + 1;
+    orfRequestTokensRef.current[document.id] = requestToken;
+    if (force) {
+      setSequenceSelections((current) => current[document.id]?.source === "orf" ? { ...current, [document.id]: null } : current);
+      orfTranslationTokensRef.current[document.id] = (orfTranslationTokensRef.current[document.id] ?? 0) + 1;
+      setOrfTranslations((current) => ({ ...current, [document.id]: null }));
+    }
+    setOrfAnalyses((current) => ({ ...current, [document.id]: { revision: document.revision, minimumAminoAcids, loading: true, error: null, truncated: false, items: [] } }));
+    try {
+      const result = await invoke<OrfAnalysisResponse>("analyze_open_reading_frames", { request: { sequence: document.document.sequence, circular: document.document.topology === "circular", minimumAminoAcids } });
+      const items = result.orfs;
+      const live = documentsRef.current.find((item) => item.id === document.id);
+      if (!live || live.revision !== document.revision || orfRequestTokensRef.current[document.id] !== requestToken) return;
+      setOrfAnalyses((current) => ({ ...current, [document.id]: { revision: document.revision, minimumAminoAcids, loading: false, error: null, truncated: result.truncated, items } }));
+      setStatus(`Found ${items.length.toLocaleString()}${result.truncated ? "+" : ""} complete ORFs across six reading frames`);
+    } catch (error) {
+      const live = documentsRef.current.find((item) => item.id === document.id);
+      if (!live || live.revision !== document.revision || orfRequestTokensRef.current[document.id] !== requestToken) return;
+      setOrfAnalyses((current) => ({ ...current, [document.id]: { revision: document.revision, minimumAminoAcids, loading: false, error: String(error), truncated: false, items: [] } }));
+      setStatus(`ORF analysis failed: ${String(error)}`);
+    }
+  }
+
+  function openOrfs() {
+    if (!active) return;
+    setActiveView("sequence");
+    setBottomOpen(true);
+    setBottomView("ORFs");
+    setShowTranslations((current) => ({ ...current, [active.id]: current[active.id] ?? true }));
+    void analyzeOrfs(active, activeOrfState?.minimumAminoAcids ?? 20);
+  }
+
+  async function loadOrfTranslation(document: OpenDocument, orf: OpenReadingFrame) {
+    const requestToken = (orfTranslationTokensRef.current[document.id] ?? 0) + 1;
+    orfTranslationTokensRef.current[document.id] = requestToken;
+    setOrfTranslations((current) => ({ ...current, [document.id]: null }));
+    setStatus(`Translating ORF frame ${orf.frame > 0 ? `+${orf.frame}` : orf.frame}…`);
+    try {
+      const translation = await invoke<OrfTranslation>("translate_selected_open_reading_frame", { request: { sequence: document.document.sequence, circular: document.document.topology === "circular", orf } });
+      const live = documentsRef.current.find((item) => item.id === document.id);
+      if (!live || live.revision !== document.revision || orfTranslationTokensRef.current[document.id] !== requestToken) return;
+      setOrfTranslations((current) => ({ ...current, [document.id]: translation }));
+      setStatus(`Translated ORF frame ${orf.frame > 0 ? `+${orf.frame}` : orf.frame} · ${orf.aminoAcidLength.toLocaleString()} aa`);
+    } catch (error) {
+      const live = documentsRef.current.find((item) => item.id === document.id);
+      if (!live || live.revision !== document.revision || orfTranslationTokensRef.current[document.id] !== requestToken) return;
+      setStatus(`ORF translation unavailable: ${String(error)}`);
+      setDocumentDiagnostics((current) => ({ ...current, [document.id]: [...(current[document.id] ?? []), { level: "warn", title: "Translation track unavailable", body: String(error) }] }));
+    }
+  }
+
+  function selectOrf(orf: OpenReadingFrame) {
+    if (!active) return;
+    setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setShowTranslations((current) => ({ ...current, [active.id]: true }));
+    revealSelection(active, {
+      source: "orf",
+      entityId: `orf:${orf.id}`,
+      label: `ORF frame ${orf.frame > 0 ? `+${orf.frame}` : orf.frame}`,
+      intervals: orf.intervals,
+      strand: orf.strand,
+      wrapsOrigin: orf.wrapsOrigin,
+      detail: `${orf.aminoAcidLength.toLocaleString()} aa · complete start-to-stop ORF`,
+    });
+    void loadOrfTranslation(active, orf);
+  }
+
+  function setBottomPanelView(view: BottomView) {
+    if (view === "Find") openFind();
+    else if (view === "ORFs") openOrfs();
+    else setBottomView(view);
+  }
 
   function updateDocuments(update: (current: OpenDocument[]) => OpenDocument[]) {
     const next = update(documentsRef.current);
     documentsRef.current = next;
     setDocuments(next);
+  }
+
+  function invalidateDerivedState(documentId: string) {
+    orfRequestTokensRef.current[documentId] = (orfRequestTokensRef.current[documentId] ?? 0) + 1;
+    orfTranslationTokensRef.current[documentId] = (orfTranslationTokensRef.current[documentId] ?? 0) + 1;
+    findRequestTokensRef.current[documentId] = (findRequestTokensRef.current[documentId] ?? 0) + 1;
+    setSequenceSelections((current) => ({ ...current, [documentId]: null }));
+    setOrfAnalyses((current) => {
+      const updated = { ...current };
+      delete updated[documentId];
+      return updated;
+    });
+    setOrfTranslations((current) => ({ ...current, [documentId]: null }));
+    setFindAnalyses((current) => { const updated = { ...current }; delete updated[documentId]; return updated; });
   }
 
   function setPending(setter: (value: Set<string>) => void, reference: { current: Set<string> }, id: string, pending: boolean) {
@@ -563,6 +890,84 @@ export default function App() {
     }
     setNewDocumentOpen(true);
   }
+
+  useEffect(() => {
+    if (!active) return;
+    const document = active;
+    const validation = validateFindQuery(findQuery);
+    const requestToken = (findRequestTokensRef.current[document.id] ?? 0) + 1;
+    findRequestTokensRef.current[document.id] = requestToken;
+    if (!validation.query || validation.error) {
+      setFindAnalyses((current) => ({
+        ...current,
+        [document.id]: { revision: document.revision, query: findQuery, loading: false, error: validation.error, capped: false, matches: [] },
+      }));
+      return;
+    }
+    setFindAnalyses((current) => ({
+      ...current,
+      [document.id]: { revision: document.revision, query: findQuery, loading: true, error: null, capped: false, matches: [] },
+    }));
+    const executeSearch = () => {
+      if (findRequestTokensRef.current[document.id] !== requestToken) return;
+      if (findInFlightRef.current.has(document.id)) {
+        findQueuedRunsRef.current[document.id] = executeSearch;
+        return;
+      }
+      findInFlightRef.current.add(document.id);
+      void invoke<SequenceMatch[]>("find_sequence", {
+        request: {
+          sequence: document.document.sequence,
+          query: validation.query,
+          circular: document.document.topology === "circular",
+          maximumResults: MAX_FIND_MATCHES + 1,
+        },
+      }).then((results) => {
+        const live = documentsRef.current.find((item) => item.id === document.id);
+        if (!live || live.revision !== document.revision || findRequestTokensRef.current[document.id] !== requestToken) return;
+        const capped = results.length > MAX_FIND_MATCHES;
+        const matches = results.slice(0, MAX_FIND_MATCHES);
+        setFindAnalyses((current) => ({ ...current, [document.id]: { revision: document.revision, query: findQuery, loading: false, error: null, capped, matches } }));
+        setFindIndices((current) => ({ ...current, [document.id]: 0 }));
+        if (matches.length) {
+          const match = matches[0];
+          setSelectedFeatures((current) => ({ ...current, [document.id]: null }));
+          setSequenceSelections((current) => ({ ...current, [document.id]: {
+            documentId: document.id,
+            revision: document.revision,
+            source: "find",
+            entityId: `find:${validation.query}:${match.start}:${match.strand}`,
+            label: `Find “${findQuery}”`,
+            intervals: match.intervals,
+            strand: match.strand,
+            wrapsOrigin: match.wrapsOrigin,
+            revealToken: ++revealTokenRef.current,
+            detail: `Match 1 of ${matches.length}${capped ? "+" : ""} · ${match.strand} strand`,
+          } }));
+          setStatus(`Find match 1 of ${matches.length}${capped ? "+" : ""} · ${match.strand} strand · ${displayIntervals(match.intervals)}`);
+        } else {
+          setSequenceSelections((current) => current[document.id]?.source === "find" ? { ...current, [document.id]: null } : current);
+          setStatus(`No matches for “${findQuery}” on either strand`);
+        }
+      }).catch((error: unknown) => {
+        const live = documentsRef.current.find((item) => item.id === document.id);
+        if (!live || live.revision !== document.revision || findRequestTokensRef.current[document.id] !== requestToken) return;
+        setFindAnalyses((current) => ({ ...current, [document.id]: { revision: document.revision, query: findQuery, loading: false, error: String(error), capped: false, matches: [] } }));
+        setStatus(`Sequence search failed: ${String(error)}`);
+      }).finally(() => {
+        findInFlightRef.current.delete(document.id);
+        const queued = findQueuedRunsRef.current[document.id];
+        delete findQueuedRunsRef.current[document.id];
+        queued?.();
+      });
+    };
+    const timeout = window.setTimeout(executeSearch, 140);
+    return () => {
+      window.clearTimeout(timeout);
+      if (findQueuedRunsRef.current[document.id] === executeSearch) delete findQueuedRunsRef.current[document.id];
+      if (findRequestTokensRef.current[document.id] === requestToken) findRequestTokensRef.current[document.id] = requestToken + 1;
+    };
+  }, [active?.document.sequence, active?.document.topology, active?.id, active?.revision, findQuery]);
 
   useEffect(() => {
     let cancelled = false;
@@ -665,6 +1070,20 @@ export default function App() {
       delete updated[id];
       return updated;
     });
+    setSequenceSelections((current) => {
+      const updated = { ...current };
+      delete updated[id];
+      return updated;
+    });
+    setFindQueries((current) => { const updated = { ...current }; delete updated[id]; return updated; });
+    setFindIndices((current) => { const updated = { ...current }; delete updated[id]; return updated; });
+    setFindAnalyses((current) => { const updated = { ...current }; delete updated[id]; return updated; });
+    setOrfAnalyses((current) => { const updated = { ...current }; delete updated[id]; return updated; });
+    setOrfTranslations((current) => { const updated = { ...current }; delete updated[id]; return updated; });
+    setShowTranslations((current) => { const updated = { ...current }; delete updated[id]; return updated; });
+    delete orfRequestTokensRef.current[id];
+    delete orfTranslationTokensRef.current[id];
+    delete findRequestTokensRef.current[id];
     setDocumentDiagnostics((current) => {
       const updated = { ...current };
       delete updated[id];
@@ -695,6 +1114,7 @@ export default function App() {
     };
     editHistoriesRef.current = nextHistories;
     setEditHistories(nextHistories);
+    invalidateDerivedState(active.id);
     updateDocuments((current) => current.map((document) => document.id === active.id ? {
       ...previous,
       path: active.path,
@@ -721,6 +1141,7 @@ export default function App() {
     };
     editHistoriesRef.current = nextHistories;
     setEditHistories(nextHistories);
+    invalidateDerivedState(active.id);
     updateDocuments((current) => current.map((document) => document.id === active.id ? {
       ...next,
       path: active.path,
@@ -943,6 +1364,7 @@ export default function App() {
       };
       editHistoriesRef.current = nextHistories;
       setEditHistories(nextHistories);
+      invalidateDerivedState(documentId);
       updateDocuments((current) => current.map((document) => document.id === documentId && document.revision === editingDocument.revision ? {
         ...document,
         document: summary.document,
@@ -978,7 +1400,13 @@ export default function App() {
         }
         return;
       }
-      if (key === "s") {
+      if (key === "f") {
+        event.preventDefault();
+        openFind();
+      } else if (key === "g") {
+        event.preventDefault();
+        moveFind(event.shiftKey ? -1 : 1);
+      } else if (key === "s") {
         event.preventDefault();
         void saveActiveDocument(event.shiftKey);
       } else if (key === "n") {
@@ -1081,7 +1509,7 @@ export default function App() {
           </div>
         </div>
         <div className="toolbar-spacer" />
-        <div className="tool-group compact"><ToolButton icon="search" label="Find" disabled disabledReason="Sequence Find is planned but not implemented yet." /><ToolButton icon="split" label="Split" disabled disabledReason="Split view is planned but not implemented yet." /><ToolButton icon="inspector" label="Inspector" active={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)} /></div>
+        <div className="tool-group compact"><ToolButton icon="search" label="Find" disabled={!active} onClick={openFind} /><ToolButton icon="split" label="Split" disabled disabledReason="Split view is planned but not implemented yet." /><ToolButton icon="inspector" label="Inspector" active={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)} /></div>
       </section>
 
       <section className={`workspace${sidebarOpen ? "" : " no-sidebar"}${inspectorOpen ? "" : " no-inspector"}${bottomOpen ? "" : " no-bottom"}`}>
@@ -1101,8 +1529,8 @@ export default function App() {
           {active ? <>
             <nav className="view-tabs">{views.map((view) => <button className={active.view === view.id ? "active" : ""} key={view.id} onClick={() => setActiveView(view.id)} title={view.shortcut}>{view.label}</button>)}<span /><label><input checked={monochrome} onChange={(event) => setMonochrome(event.target.checked)} type="checkbox" /> Monochrome bases</label></nav>
             <div className="view-content">
-              {active.view === "map" && <Suspense fallback={<div className="map-loading">Starting accelerated map renderer…</div>}><PlasmidMap name={active.document.name} topology={active.document.topology} sequenceLength={active.length} features={active.document.features} restrictionSites={restrictionSites} selectedFeature={selectedFeature} onSelectFeature={selectFeature} zoom={zoom} showEnzymes={showEnzymes} /></Suspense>}
-              {active.view === "sequence" && <SequenceView key={active.id} sequence={active.document.sequence} monochrome={monochrome} disabled={activeBusy} onApply={(sequence) => applySequenceEdit(active.id, sequence)} onDraftStateChange={(dirty) => setDocumentDraftState(active.id, dirty)} />}
+              {active.view === "map" && <Suspense fallback={<div className="map-loading">Starting accelerated map renderer…</div>}><PlasmidMap name={active.document.name} topology={active.document.topology} sequenceLength={active.length} features={active.document.features} restrictionSites={restrictionSites} restrictionSitesTruncated={restrictionScan.truncated} selection={activeSelection} selectedFeature={selectedFeature} onSelectFeature={selectFeature} onSelectRestrictionSite={selectRestrictionSite} zoom={zoom} showEnzymes={showEnzymes} /></Suspense>}
+              {active.view === "sequence" && <SequenceView key={active.id} sequence={active.document.sequence} monochrome={monochrome} disabled={activeBusy} selection={activeSelection} secondaryIntervals={bottomView === "Find" ? secondaryFindIntervals : []} translation={activeTranslation} onApply={(sequence) => applySequenceEdit(active.id, sequence)} onDraftStateChange={(dirty) => setDocumentDraftState(active.id, dirty)} />}
               {active.view === "features" && <FeatureTable features={active.document.features} selected={selectedFeature} onSelect={selectFeature} />}
               {active.view === "primers" && <PrimerTable document={active} checks={primerChecks} />}
               {active.view === "history" && <HistoryView document={active} />}
@@ -1110,8 +1538,32 @@ export default function App() {
           </> : <EmptyWorkspace onNew={beginNewDocument} onOpen={() => void openFile()} />}
         </section>
 
-        {inspectorOpen && <Inspector active={active} selectedFeature={selectedFeature} />}
-        {bottomOpen && <BottomPanel view={bottomView} active={active} setView={setBottomView} zoom={zoom} setZoom={setZoom} showEnzymes={showEnzymes} setShowEnzymes={setShowEnzymes} primerChecks={primerChecks} restrictionSites={restrictionSites} diagnostics={[...appDiagnostics, ...(active ? documentDiagnostics[active.id] ?? [] : [])]} />}
+        {inspectorOpen && <Inspector active={active} selectedFeature={selectedFeature} selection={activeSelection} />}
+        {bottomOpen && <BottomPanel view={bottomView} active={active} setView={setBottomPanelView} zoom={zoom} setZoom={setZoom} showEnzymes={showEnzymes} setShowEnzymes={setShowEnzymes} primerChecks={primerChecks} restrictionSites={restrictionSites} restrictionSitesTruncated={restrictionScan.truncated} selectedRestrictionId={activeSelection?.source === "restriction" ? activeSelection.entityId : null} onSelectRestrictionSite={selectRestrictionSite} diagnostics={[...appDiagnostics, ...(active ? documentDiagnostics[active.id] ?? [] : [])]} findProps={{
+          query: findQuery,
+          validationError: findValidation.error ?? visibleFindAnalysis?.error ?? null,
+          loading: visibleFindAnalysis?.loading ?? false,
+          count: findMatches.length,
+          capped: visibleFindAnalysis?.capped ?? false,
+          index: findIndex,
+          focusToken: findFocusToken,
+          onQueryChange: changeFindQuery,
+          onMove: moveFind,
+          onClose: () => setBottomView("Map Controls"),
+        }} orfProps={{
+          documentId: active?.id ?? null,
+          state: active && activeOrfState?.revision === active.revision ? activeOrfState : null,
+          selectedId: selectedOrf?.id ?? null,
+          showTranslation: active ? showTranslations[active.id] ?? true : false,
+          onMinimumChange: (minimum) => { if (active) void analyzeOrfs(active, minimum, true); },
+          onRefresh: () => { if (active) void analyzeOrfs(active, activeOrfState?.minimumAminoAcids ?? 20, true); },
+          onSelect: selectOrf,
+          onShowTranslation: (show) => {
+            if (!active) return;
+            setShowTranslations((current) => ({ ...current, [active.id]: show }));
+            if (show && selectedOrf && storedTranslation?.orfId !== selectedOrf.id) void loadOrfTranslation(active, selectedOrf);
+          },
+        }} />}
       </section>
 
       <footer className="statusbar"><button onClick={() => setBottomOpen((value) => !value)}>{bottomOpen ? "⌄" : "⌃"}</button><span className="status-ready" /> <strong>{status}</strong><div />{active && <><span>{active.document.topology === "circular" ? "Circular" : "Linear"}</span><span>dsDNA</span><span className="mono">{active.length.toLocaleString()} bp</span><span className="mono">GC {active.gcPercent.toFixed(1)}%</span></>}</footer>

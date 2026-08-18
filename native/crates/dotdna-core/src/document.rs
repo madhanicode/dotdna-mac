@@ -539,6 +539,10 @@ pub enum SequenceError {
     Empty,
     #[error("unsupported DNA base '{0}'")]
     InvalidBase(char),
+    #[error(
+        "IUPAC-aware searches longer than {maximum} bases are not supported (received {length}); search for a shorter distinctive region"
+    )]
+    AmbiguousSearchTooLong { length: usize, maximum: usize },
 }
 
 #[must_use]

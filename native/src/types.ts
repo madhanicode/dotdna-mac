@@ -170,3 +170,29 @@ export type CommandError = {
   message: string;
   action: string;
 };
+
+export type TranslatedCodon = {
+  center: number;
+  aminoAcid: string;
+  kind: "start" | "stop" | "amino" | "ambiguous";
+};
+
+export type OpenReadingFrame = {
+  id: string;
+  intervals: SequenceSpan[];
+  strand: "forward" | "reverse";
+  frame: number;
+  wrapsOrigin: boolean;
+  nucleotideLength: number;
+  aminoAcidLength: number;
+  codingStart: number;
+  codingStop: number;
+};
+
+export type OrfTranslation = {
+  orfId: string;
+  strand: "forward" | "reverse";
+  frame: number;
+  aminoAcids: string;
+  codons: TranslatedCodon[];
+};

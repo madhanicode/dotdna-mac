@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dotdna_core::{
-    DocumentDiagnostic, PcrOptions, PcrProduct, PrimerAnalysis, PrimerBinding, SequenceDocument,
-    ThermodynamicConditions, Topology, analyze_primer, find_primer_bindings,
-    simulate_inverse_pcr as run_inverse_pcr,
+    DocumentDiagnostic, OpenReadingFrame, OrfAnalysisResult, OrfTranslation, PcrOptions,
+    PcrProduct, PrimerAnalysis, PrimerBinding, SequenceDocument, SequenceMatch,
+    ThermodynamicConditions, Topology, analyze_orfs_with_status, analyze_primer,
+    find_primer_bindings, find_sequence_matches, simulate_inverse_pcr as run_inverse_pcr,
     simulate_overlap_extension_pcr as run_overlap_extension_pcr, simulate_pcr as run_standard_pcr,
+    translate_open_reading_frame,
 };
 use dotdna_io::{SequenceFormat, parse_snapgene_named, parse_text_document, to_dotdna_project};
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,31 @@ struct CreateDocumentRequest {
     name: String,
     sequence: String,
     circular: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrfAnalysisRequest {
+    sequence: String,
+    circular: bool,
+    minimum_amino_acids: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrfTranslationRequest {
+    sequence: String,
+    circular: bool,
+    orf: OpenReadingFrame,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FindSequenceRequest {
+    sequence: String,
+    query: String,
+    circular: bool,
+    maximum_results: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -599,6 +626,56 @@ async fn analyze_document_primers(
         .map_err(|error| format!("The primer worker stopped unexpectedly: {error}"))
 }
 
+#[tauri::command]
+async fn analyze_open_reading_frames(
+    request: OrfAnalysisRequest,
+) -> Result<OrfAnalysisResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        analyze_orfs_with_status(
+            &request.sequence,
+            request.circular,
+            request.minimum_amino_acids,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The ORF worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command]
+async fn translate_selected_open_reading_frame(
+    request: OrfTranslationRequest,
+) -> Result<OrfTranslation, String> {
+    const MAX_TRANSLATED_AMINO_ACIDS: usize = 250_000;
+    if request.orf.amino_acid_length > MAX_TRANSLATED_AMINO_ACIDS {
+        return Err(format!(
+            "This ORF contains {} amino acids. DOTDNA limits an on-screen translation track to {} amino acids; export or narrow the region before translating it.",
+            request.orf.amino_acid_length, MAX_TRANSLATED_AMINO_ACIDS
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        translate_open_reading_frame(&request.sequence, request.circular, &request.orf)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The translation worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command]
+async fn find_sequence(request: FindSequenceRequest) -> Result<Vec<SequenceMatch>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        find_sequence_matches(
+            &request.sequence,
+            &request.query,
+            request.circular,
+            request.maximum_results,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("The sequence-search worker stopped unexpectedly: {error}"))?
+}
+
 fn replace_document_sequence_blocking(
     mut document: SequenceDocument,
     new_sequence: &str,
@@ -897,6 +974,9 @@ pub fn run() {
             import_sequence,
             simulate_pcr_product,
             analyze_document_primers,
+            analyze_open_reading_frames,
+            translate_selected_open_reading_frame,
+            find_sequence,
             replace_document_sequence,
             update_native_menu_state
         ])
