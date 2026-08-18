@@ -160,6 +160,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .bottom-panel > nav { background: #1d2024; border-bottom: 1px solid #2b2f34; display: flex; padding-left: 5px; }
 .bottom-panel > nav button { align-items: center; background: transparent; border: 0; border-bottom: 2px solid transparent; color: #747a82; display: flex; font-size: 9px; gap: 5px; padding: 0 12px; }
 .bottom-panel > nav button.active { border-bottom-color: var(--cyan); color: #d9dce0; }
+.bottom-panel > nav button:disabled { color: #4d5259; opacity: .6; }
 .bottom-panel > nav b { background: #7d4b43; border-radius: 7px; color: #ffc0b7; font-size: 7px; min-width: 14px; padding: 1px 4px; }
 .bottom-content { min-height: 0; overflow: auto; }
 .map-control-row { align-items: center; display: flex; gap: 28px; height: 100%; min-height: 90px; padding: 15px 20px; }
@@ -178,8 +179,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .find-panel input { background: #101215; border: 1px solid #383c43; border-radius: 3px; color: #d5d8dc; font-size: 10px; height: 29px; padding: 0 9px; width: min(480px, 70%); }
 .find-panel button, .table-toolbar button { background: #2b3035; border: 1px solid #42474f; border-radius: 3px; color: #cbd0d5; font-size: 9px; height: 29px; padding: 0 11px; }
 .find-panel > span { color: #666c74; font-family: var(--mono); font-size: 8px; }
-.enzyme-grid { display: grid; gap: 1px; grid-template-columns: repeat(3, minmax(100px, 1fr)); padding: 10px; }
-.enzyme-grid button { background: #202328; border: 1px solid #2e3237; color: #aeb3b9; font-family: var(--mono); font-size: 9px; padding: 8px; text-align: left; }
+.enzyme-grid { display: grid; gap: 0 18px; grid-template-columns: repeat(3, minmax(100px, 1fr)); padding: 10px 14px; }
+.enzyme-site { border-bottom: 1px solid #30343a; color: #aeb3b9; display: flex; font-family: var(--mono); font-size: 9px; justify-content: space-between; padding: 7px 2px; text-align: left; }
+.enzyme-site span { color: #777e87; }
 .warning-list { display: grid; gap: 5px; padding: 7px 9px; }
 .warning-list article { align-items: center; background: #202328; border: 1px solid #30343a; border-left: 3px solid var(--orange); display: grid; gap: 8px; grid-template-columns: 19px minmax(0, 1fr) auto; padding: 6px 8px; }
 .warning-list article.good { border-left-color: var(--green); }

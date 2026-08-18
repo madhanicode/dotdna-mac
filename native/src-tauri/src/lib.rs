@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +31,13 @@ pub struct DocumentSummary {
 struct SavePathResolution {
     path: PathBuf,
     file_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeMenuState {
+    enabled: Vec<String>,
+    active_view: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -678,15 +686,33 @@ fn build_file_submenu<R: tauri::Runtime>(
 fn build_edit_submenu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> tauri::Result<tauri::menu::Submenu<R>> {
-    use tauri::menu::{PredefinedMenuItem, Submenu};
+    use tauri::menu::{MenuItem, PredefinedMenuItem, Submenu};
+
+    let undo_document = MenuItem::with_id(
+        app,
+        "edit.undo-document",
+        "Undo Sequence Edit",
+        false,
+        None::<&str>,
+    )?;
+    let redo_document = MenuItem::with_id(
+        app,
+        "edit.redo-document",
+        "Redo Sequence Edit",
+        false,
+        None::<&str>,
+    )?;
 
     Submenu::with_items(
         app,
         "Edit",
         true,
         &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
+            &undo_document,
+            &redo_document,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::undo(app, Some("Undo Text Edit"))?,
+            &PredefinedMenuItem::redo(app, Some("Redo Text Edit"))?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
@@ -699,13 +725,41 @@ fn build_edit_submenu<R: tauri::Runtime>(
 fn build_view_submenu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> tauri::Result<tauri::menu::Submenu<R>> {
-    use tauri::menu::{MenuItem, Submenu};
+    use tauri::menu::{CheckMenuItem, Submenu};
 
-    let map = MenuItem::with_id(app, "view.map", "Map", true, Some("CmdOrCtrl+1"))?;
-    let sequence = MenuItem::with_id(app, "view.sequence", "Sequence", true, Some("CmdOrCtrl+2"))?;
-    let features = MenuItem::with_id(app, "view.features", "Features", true, Some("CmdOrCtrl+3"))?;
-    let primers = MenuItem::with_id(app, "view.primers", "Primers", true, Some("CmdOrCtrl+4"))?;
-    let history = MenuItem::with_id(app, "view.history", "History", true, Some("CmdOrCtrl+5"))?;
+    let map = CheckMenuItem::with_id(app, "view.map", "Map", false, true, Some("CmdOrCtrl+1"))?;
+    let sequence = CheckMenuItem::with_id(
+        app,
+        "view.sequence",
+        "Sequence",
+        false,
+        false,
+        Some("CmdOrCtrl+2"),
+    )?;
+    let features = CheckMenuItem::with_id(
+        app,
+        "view.features",
+        "Features",
+        false,
+        false,
+        Some("CmdOrCtrl+3"),
+    )?;
+    let primers = CheckMenuItem::with_id(
+        app,
+        "view.primers",
+        "Primers",
+        false,
+        false,
+        Some("CmdOrCtrl+4"),
+    )?;
+    let history = CheckMenuItem::with_id(
+        app,
+        "view.history",
+        "History",
+        false,
+        false,
+        Some("CmdOrCtrl+5"),
+    )?;
     Submenu::with_items(
         app,
         "View",
@@ -742,6 +796,78 @@ fn build_app_menu<R: tauri::Runtime>(
     tauri::menu::Menu::with_items(app, &[&application, &file, &edit, &view, &window])
 }
 
+fn native_menu_item<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    id: &str,
+) -> Option<tauri::menu::MenuItemKind<R>> {
+    let menu = app.menu()?;
+    for item in menu.items().ok()? {
+        if item.id().as_ref() == id {
+            return Some(item);
+        }
+        if let Some(submenu) = item.as_submenu()
+            && let Some(child) = submenu.get(id)
+        {
+            return Some(child);
+        }
+    }
+    None
+}
+
+fn set_native_menu_enabled<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let item = native_menu_item(app, id).ok_or_else(|| format!("Menu item {id} was not found"))?;
+    match item {
+        tauri::menu::MenuItemKind::MenuItem(item) => item.set_enabled(enabled),
+        tauri::menu::MenuItemKind::Check(item) => item.set_enabled(enabled),
+        _ => return Err(format!("Menu item {id} cannot be enabled or disabled")),
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn set_native_menu_checked<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    id: &str,
+    checked: bool,
+) -> Result<(), String> {
+    let item = native_menu_item(app, id).ok_or_else(|| format!("Menu item {id} was not found"))?;
+    item.as_check_menuitem()
+        .ok_or_else(|| format!("Menu item {id} is not checkable"))?
+        .set_checked(checked)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri injects owned command arguments.
+fn update_native_menu_state(app: tauri::AppHandle, state: NativeMenuState) -> Result<(), String> {
+    let NativeMenuState {
+        enabled,
+        active_view,
+    } = state;
+    let enabled: HashSet<String> = enabled.into_iter().collect();
+    for id in [
+        "file.new",
+        "file.open",
+        "file.save",
+        "file.save-as",
+        "file.close",
+        "edit.undo-document",
+        "edit.redo-document",
+    ] {
+        set_native_menu_enabled(&app, id, enabled.contains(id))?;
+    }
+
+    for view in ["map", "sequence", "features", "primers", "history"] {
+        let id = format!("view.{view}");
+        set_native_menu_enabled(&app, &id, enabled.contains(&id))?;
+        set_native_menu_checked(&app, &id, active_view.as_deref() == Some(view))?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the DOTDNA desktop application.
 ///
@@ -758,7 +884,8 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.close();
                 }
-            } else if id.starts_with("file.") || id.starts_with("view.") {
+            } else if id.starts_with("file.") || id.starts_with("edit.") || id.starts_with("view.")
+            {
                 let _ = app.emit("dotdna-menu", id);
             }
         })
@@ -770,7 +897,8 @@ pub fn run() {
             import_sequence,
             simulate_pcr_product,
             analyze_document_primers,
-            replace_document_sequence
+            replace_document_sequence,
+            update_native_menu_state
         ])
         .run(tauri::generate_context!())
         .expect("DOTDNA failed to start");

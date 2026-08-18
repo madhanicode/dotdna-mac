@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { demoDocument } from "./demo";
-import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nextUntitledName } from "./document-workflows";
+import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nativeMenuPayload, nativeMenuState, nextUntitledName } from "./document-workflows";
 import { findRestrictionSites, type RestrictionSite } from "./restriction-sites";
 import { SequenceView } from "./SequenceView";
 import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, PcrCommandResult, PrimerCheck, SequenceDocument } from "./types";
@@ -19,8 +19,15 @@ const views: Array<{ id: DocumentView; label: string; shortcut: string }> = [
   { id: "history", label: "History", shortcut: "⌘5" },
 ];
 
-const bottomViews = ["Map Controls", "Find", "Enzymes", "ORFs", "Warnings"] as const;
+const bottomViews = ["Map Controls", "Enzymes", "Warnings"] as const;
 type BottomView = typeof bottomViews[number];
+const bottomNavigation: Array<{ label: string; view?: BottomView; reason?: string }> = [
+  { label: "Map Controls", view: "Map Controls" },
+  { label: "Find", reason: "Sequence Find is planned but not implemented yet." },
+  { label: "Enzymes", view: "Enzymes" },
+  { label: "ORFs", reason: "ORF analysis is planned but not implemented yet." },
+  { label: "Warnings", view: "Warnings" },
+];
 type Workflow = "PCR" | "Inverse PCR" | "Overlap-Extension PCR" | null;
 type Diagnostic = { level: "warn" | "error"; title: string; body: string };
 type EditHistory = { undo: OpenDocument[]; redo: OpenDocument[] };
@@ -75,9 +82,9 @@ function Icon({ name }: { name: string }) {
   return <svg className="icon" aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.45">{drawing}</svg>;
 }
 
-function ToolButton({ icon, label, disabled, onClick, active }: { icon: string; label: string; disabled?: boolean; onClick?: () => void; active?: boolean }) {
+function ToolButton({ icon, label, disabled, disabledReason, onClick, active }: { icon: string; label: string; disabled?: boolean; disabledReason?: string; onClick?: () => void; active?: boolean }) {
   return (
-    <button className={`tool-button${active ? " active" : ""}`} disabled={disabled} onClick={onClick} title={label}>
+    <button className={`tool-button${active ? " active" : ""}`} disabled={disabled} onClick={onClick} title={disabled && disabledReason ? disabledReason : label}>
       <Icon name={icon} />
       <span>{label}</span>
     </button>
@@ -98,7 +105,7 @@ function EmptyWorkspace({ onNew, onOpen }: { onNew: () => void; onOpen: () => vo
 function FeatureTable({ features, selected, onSelect }: { features: Feature[]; selected: number | null; onSelect: (index: number) => void }) {
   return (
     <div className="table-view">
-      <div className="table-toolbar"><strong>{features.length} Features</strong><button disabled title="Feature creation is not available in this build.">＋ New Feature</button></div>
+      <div className="table-toolbar"><strong>{features.length} Features</strong><button disabled title="Feature creation is planned but not implemented yet.">＋ New Feature</button></div>
       <table>
         <thead><tr><th /><th>Name</th><th>Type</th><th>Range</th><th>Strand</th><th>Length</th></tr></thead>
         <tbody>
@@ -128,7 +135,7 @@ function FeatureTable({ features, selected, onSelect }: { features: Feature[]; s
 function PrimerTable({ document, checks }: { document: OpenDocument; checks: PrimerCheck[] }) {
   return (
     <div className="table-view">
-      <div className="table-toolbar"><strong>{document.document.primers.length} Primers</strong><button disabled title="Primer creation is not available in this build.">＋ Add Primer</button></div>
+      <div className="table-toolbar"><strong>{document.document.primers.length} Primers</strong><button disabled title="Primer authoring is the next development slice.">＋ Add Primer</button></div>
       <table>
         <thead><tr><th /><th>Name</th><th>Sequence (5′ → 3′)</th><th>Binding</th><th>Tail</th><th>Tm</th><th>Status</th></tr></thead>
         <tbody>
@@ -160,7 +167,7 @@ function HistoryView({ document }: { document: OpenDocument }) {
         <article key={`${entry.recorded_at}-${index}`}>
           <span className="history-node">{index + 1}</span>
           <div><strong>{entry.description}</strong><p>{entry.operation} · {entry.recorded_at}</p></div>
-          <button disabled title="Historical-state restoration is not available in this build.">Open State</button>
+          <button disabled title="Historical-state restoration is planned but not implemented yet.">Open State</button>
         </article>
       ))}
     </div>
@@ -172,7 +179,7 @@ function Inspector({ active, selectedFeature }: { active: OpenDocument | null; s
   if (!active) return <aside className="inspector"><header>INSPECTOR</header><p className="empty-note">Nothing selected</p></aside>;
   return (
     <aside className="inspector">
-      <header><span>INSPECTOR</span><button title="Inspector options">•••</button></header>
+      <header><span>INSPECTOR</span></header>
       {feature ? (
         <>
           <section className="inspector-hero">
@@ -180,8 +187,8 @@ function Inspector({ active, selectedFeature }: { active: OpenDocument | null; s
             <div><small>FEATURE</small><strong>{feature.name}</strong><span>{feature.kind}</span></div>
           </section>
           <section className="property-list">
-            <label><span>Name</span><input value={feature.name} readOnly /></label>
-            <label><span>Type</span><select value={feature.kind} disabled><option>{feature.kind}</option></select></label>
+            <div><span>Name</span><strong>{feature.name}</strong></div>
+            <div><span>Type</span><strong>{feature.kind}</strong></div>
             <div><span>Direction</span><strong>{feature.strand}</strong></div>
             <div><span>Range</span><strong className="mono">{feature.segments.map((segment) => `${segment.span.start + 1}–${segment.span.end}`).join(", ")}</strong></div>
             <div><span>Length</span><strong className="mono">{feature.segments.reduce((sum, segment) => sum + segment.span.end - segment.span.start, 0).toLocaleString()} bp</strong></div>
@@ -222,17 +229,15 @@ function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setSho
 
   return (
     <section className="bottom-panel">
-      <nav>{bottomViews.map((item) => <button className={view === item ? "active" : ""} key={item} onClick={() => setView(item)}>{item}{item === "Warnings" && warnings.length > 0 ? <b>{warnings.length}</b> : null}</button>)}</nav>
+      <nav>{bottomNavigation.map((item) => <button className={view === item.view ? "active" : ""} disabled={!item.view} key={item.label} onClick={() => item.view && setView(item.view)} title={item.reason}>{item.label}{item.label === "Warnings" && warnings.length > 0 ? <b>{warnings.length}</b> : null}</button>)}</nav>
       <div className="bottom-content">
         {view === "Map Controls" && <div className="map-control-row">
           <label><span>Map zoom</span><input type="range" min="0.72" max="1.18" step="0.02" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
           <label className="switch-label"><input checked={showEnzymes} onChange={(event) => setShowEnzymes(event.target.checked)} type="checkbox" /><i /><span>Restriction sites</span></label>
-          <label className="switch-label unavailable" title="Display controls are not available in this build."><input defaultChecked disabled type="checkbox" /><i /><span>Feature labels</span></label>
-          <label className="switch-label unavailable" title="Display controls are not available in this build."><input defaultChecked disabled type="checkbox" /><i /><span>Primer sites</span></label>
+          <label className="switch-label unavailable" title="Feature-label display controls are planned but not implemented yet."><input defaultChecked disabled type="checkbox" /><i /><span>Feature labels</span></label>
+          <label className="switch-label unavailable" title="Primer-site display controls are planned but not implemented yet."><input defaultChecked disabled type="checkbox" /><i /><span>Primer sites</span></label>
         </div>}
-        {view === "Find" && <div className="find-panel"><input disabled placeholder="Sequence search is not available in this build." /><button disabled>Find Next</button><span>⌘F</span></div>}
-        {view === "Enzymes" && (restrictionSites.length ? <div className="enzyme-grid">{restrictionSites.map((site) => <button key={`${site.enzyme}-${site.position}`}>{site.enzyme} <span className="mono">{(site.position + 1).toLocaleString()}</span></button>)}</div> : <div className="empty-note">No sites for the six common enzymes in the active sequence.</div>)}
-        {view === "ORFs" && <div className="empty-note">Open reading frames will appear here for the selected translation threshold.</div>}
+        {view === "Enzymes" && (restrictionSites.length ? <div className="enzyme-grid">{restrictionSites.map((site) => <div className="enzyme-site" key={`${site.enzyme}-${site.position}`}>{site.enzyme} <span className="mono">{(site.position + 1).toLocaleString()}</span></div>)}</div> : <div className="empty-note">No sites for the six common enzymes in the active sequence.</div>)}
         {view === "Warnings" && (warnings.length ? <div className="warning-list">{warnings.map((warning, index) => <article className={warning.level} key={`${warning.title}-${index}`}><span>!</span><div><strong>{warning.title}</strong><p>{warning.body}</p></div></article>)}</div> : <div className="empty-note">No current diagnostics. PCR workflows perform separate 3′ binding and thermodynamic checks.</div>)}
       </div>
     </section>
@@ -478,6 +483,7 @@ export default function App() {
   const [draftDocumentIds, setDraftDocumentIds] = useState<Set<string>>(() => new Set());
   const draftDocumentIdsRef = useRef(draftDocumentIds);
   const menuActionRef = useRef<(id: string) => void>(() => undefined);
+  const menuStateSyncRef = useRef<Promise<unknown>>(Promise.resolve());
   const openingDocumentRef = useRef(false);
   const reservedSavePathsRef = useRef<Map<string, string>>(new Map());
   const newDocumentOpenRef = useRef(newDocumentOpen);
@@ -491,6 +497,17 @@ export default function App() {
   const activeCanSave = canSaveDocument(active, activeBusy);
   const canUndo = active ? !activeBusy && (editHistories[active.id]?.undo.length ?? 0) > 0 : false;
   const canRedo = active ? !activeBusy && (editHistories[active.id]?.redo.length ?? 0) > 0 : false;
+  const nativeMenu = nativeMenuState({
+    hasActiveDocument: active !== null,
+    activeBusy,
+    activeCanSave,
+    canUndo,
+    canRedo,
+    hasDraft: draftDocumentIds.size > 0,
+    modalOpen: newDocumentOpen || workflow !== null || closeRequest !== null,
+    closeBusy: closeRequestBusy,
+    activeView: active?.view ?? null,
+  });
   const filteredDocuments = useMemo(() => documents.filter((document) => document.document.name.toLowerCase().includes(projectSearch.toLowerCase())), [documents, projectSearch]);
   const restrictionSites = useMemo(() => active ? findRestrictionSites(active.document.sequence, active.document.topology === "circular") : [], [active]);
   const selectFeature = useCallback((index: number) => {
@@ -861,9 +878,14 @@ export default function App() {
     else if (id === "file.save") void saveActiveDocument();
     else if (id === "file.save-as") void saveActiveDocument(true);
     else if (id === "file.close" && active) closeDocument(active.id);
+    else if (id === "edit.undo-document") undoActiveDocument();
+    else if (id === "edit.redo-document") redoActiveDocument();
     else {
       const requestedView = views.find((view) => `view.${view.id}` === id);
-      if (requestedView) setActiveView(requestedView.id);
+      if (requestedView) {
+        setActiveView(requestedView.id);
+        syncNativeMenu({ ...nativeMenu, activeView: requestedView.id });
+      }
     }
   }
 
@@ -981,6 +1003,18 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleShortcut);
   });
 
+  function syncNativeMenu(state = nativeMenu) {
+    const payload = nativeMenuPayload(state);
+    menuStateSyncRef.current = menuStateSyncRef.current
+      .catch(() => undefined)
+      .then(() => invoke("update_native_menu_state", { state: payload }))
+      .catch(() => undefined);
+  }
+
+  useEffect(() => {
+    syncNativeMenu();
+  }, [nativeMenu.newDocument, nativeMenu.openDocument, nativeMenu.save, nativeMenu.saveAs, nativeMenu.close, nativeMenu.undo, nativeMenu.redo, nativeMenu.changeView, nativeMenu.activeView]);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
@@ -1033,7 +1067,7 @@ export default function App() {
       <header className="titlebar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><i><span /><span /><span /></i><strong>DOTDNA</strong><em>LAB</em></div>
         <div className="title-document" data-tauri-drag-region>{active?.document.name ?? "No Document"}{active?.dirty ? " •" : ""}</div>
-        <div className="title-actions"><button disabled title="Command palette is planned for a later build.">⌘K</button></div>
+        <div className="title-actions"><button disabled title="Command palette is planned but not implemented yet.">⌘K</button></div>
       </header>
 
       <section className="toolbar">
@@ -1041,13 +1075,13 @@ export default function App() {
         <div className="tool-divider" />
         <div className="tool-group"><ToolButton icon="undo" label="Undo" disabled={!canUndo} onClick={undoActiveDocument} /><ToolButton icon="redo" label="Redo" disabled={!canRedo} onClick={redoActiveDocument} /></div>
         <div className="tool-divider" />
-        <div className="tool-group"><ToolButton icon="annotate" label="Feature" disabled /><ToolButton icon="primer" label="Primer" disabled />
+        <div className="tool-group"><ToolButton icon="annotate" label="Feature" disabled disabledReason="Feature creation is planned but not implemented yet." /><ToolButton icon="primer" label="Primer" disabled disabledReason="Primer authoring is the next development slice." />
           <div className="action-menu-wrap"><ToolButton icon="actions" label="Actions" active={actionsOpen} disabled={!active} onClick={() => setActionsOpen((value) => !value)} />
-            {actionsOpen && <div className="action-menu"><small>MOLECULAR ACTIONS</small><button onClick={() => chooseWorkflow("PCR")}><b>PCR…</b><span>Amplify between primers</span></button><button onClick={() => chooseWorkflow("Inverse PCR")}><b>Inverse PCR…</b><span>Mutate or delete circular DNA</span></button><button onClick={() => chooseWorkflow("Overlap-Extension PCR")}><b>Overlap-Extension PCR…</b><span>Join overlapping products</span></button><hr /><button disabled><b>Restriction Digest…</b><span>Not available in this build</span></button><button disabled><b>Assembly…</b><span>Not available in this build</span></button></div>}
+            {actionsOpen && <div className="action-menu"><small>MOLECULAR ACTIONS</small><button onClick={() => chooseWorkflow("PCR")}><b>PCR…</b><span>Amplify between primers</span></button><button onClick={() => chooseWorkflow("Inverse PCR")}><b>Inverse PCR…</b><span>Mutate or delete circular DNA</span></button><button onClick={() => chooseWorkflow("Overlap-Extension PCR")}><b>Overlap-Extension PCR…</b><span>Join overlapping products</span></button><hr /><button disabled title="Restriction digest is planned but not implemented yet."><b>Restriction Digest…</b><span>Planned</span></button><button disabled title="Assembly is planned but not implemented yet."><b>Assembly…</b><span>Planned</span></button></div>}
           </div>
         </div>
         <div className="toolbar-spacer" />
-        <div className="tool-group compact"><ToolButton icon="search" label="Find" disabled /><ToolButton icon="split" label="Split" disabled /><ToolButton icon="inspector" label="Inspector" active={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)} /></div>
+        <div className="tool-group compact"><ToolButton icon="search" label="Find" disabled disabledReason="Sequence Find is planned but not implemented yet." /><ToolButton icon="split" label="Split" disabled disabledReason="Split view is planned but not implemented yet." /><ToolButton icon="inspector" label="Inspector" active={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)} /></div>
       </section>
 
       <section className={`workspace${sidebarOpen ? "" : " no-sidebar"}${inspectorOpen ? "" : " no-inspector"}${bottomOpen ? "" : " no-bottom"}`}>
@@ -1056,7 +1090,7 @@ export default function App() {
           <div className="project-search"><Icon name="search" /><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Filter files" /></div>
           <section><h3>OPEN DOCUMENTS <span>{documents.length}</span></h3>{filteredDocuments.map((document) => <button className={document.id === activeId ? "active file-row" : "file-row"} key={document.id} onClick={() => activateDocument(document.id)}><i className={document.document.topology} /><span><strong>{document.document.name}</strong><small>{document.length.toLocaleString()} bp · {document.format}</small></span>{document.dirty && <em>●</em>}</button>)}</section>
           <section className="folder-section"><h3>PROJECT FOLDER</h3><p className="folder-empty">No folder is open.</p></section>
-          <footer><button disabled title="Folder workspaces are not available in this build.">＋ Open Folder…</button></footer>
+          <footer><button disabled title="Folder workspaces are planned but not implemented yet.">＋ Open Folder…</button></footer>
         </aside>}
 
         <section className="document-area">

@@ -1,6 +1,59 @@
-import type { OpenDocument, SequenceDocument } from "./types";
+import type { DocumentView, OpenDocument, SequenceDocument } from "./types";
 
 type SaveDocumentState = Pick<OpenDocument, "dirty" | "format" | "path" | "document">;
+
+export type NativeMenuState = {
+  newDocument: boolean;
+  openDocument: boolean;
+  save: boolean;
+  saveAs: boolean;
+  close: boolean;
+  undo: boolean;
+  redo: boolean;
+  changeView: boolean;
+  activeView: DocumentView | null;
+};
+
+const nativeViewIds: DocumentView[] = ["map", "sequence", "features", "primers", "history"];
+
+export function nativeMenuPayload(state: NativeMenuState) {
+  const enabled = [
+    state.newDocument ? "file.new" : null,
+    state.openDocument ? "file.open" : null,
+    state.save ? "file.save" : null,
+    state.saveAs ? "file.save-as" : null,
+    state.close ? "file.close" : null,
+    state.undo ? "edit.undo-document" : null,
+    state.redo ? "edit.redo-document" : null,
+    ...(state.changeView ? nativeViewIds.map((view) => `view.${view}`) : []),
+  ].filter((id): id is string => id !== null);
+  return { enabled, activeView: state.activeView };
+}
+
+export function nativeMenuState(input: {
+  hasActiveDocument: boolean;
+  activeBusy: boolean;
+  activeCanSave: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  hasDraft: boolean;
+  modalOpen: boolean;
+  closeBusy: boolean;
+  activeView: DocumentView | null;
+}): NativeMenuState {
+  const blocked = input.modalOpen || input.hasDraft;
+  return {
+    newDocument: !blocked,
+    openDocument: !blocked,
+    save: !blocked && input.hasActiveDocument && input.activeCanSave,
+    saveAs: !blocked && input.hasActiveDocument && !input.activeBusy,
+    close: !blocked && !input.closeBusy && input.hasActiveDocument && !input.activeBusy,
+    undo: !blocked && input.canUndo,
+    redo: !blocked && input.canRedo,
+    changeView: !blocked && input.hasActiveDocument,
+    activeView: input.activeView,
+  };
+}
 
 export function directProjectPath(document: SaveDocumentState) {
   return document.format === "DOTDNA Project" && document.path ? document.path : null;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nextUntitledName } from "./document-workflows";
+import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nativeMenuPayload, nativeMenuState, nextUntitledName } from "./document-workflows";
 import type { OpenDocument } from "./types";
 
 function document(overrides: Partial<OpenDocument> = {}): OpenDocument {
@@ -63,5 +63,79 @@ describe("document save workflows", () => {
     const undone = { ...saved.document, sequence: "AAAACCCC" };
     expect(matchesDocumentSavepoint(savepoint, undone)).toBe(false);
     expect(matchesDocumentSavepoint(savepoint, saved.document)).toBe(true);
+  });
+
+  it("enables only menu commands that can act on the current document", () => {
+    expect(nativeMenuState({
+      hasActiveDocument: true,
+      activeBusy: false,
+      activeCanSave: true,
+      canUndo: true,
+      canRedo: false,
+      hasDraft: false,
+      modalOpen: false,
+      closeBusy: false,
+      activeView: "sequence",
+    })).toEqual({
+      newDocument: true,
+      openDocument: true,
+      save: true,
+      saveAs: true,
+      close: true,
+      undo: true,
+      redo: false,
+      changeView: true,
+      activeView: "sequence",
+    });
+  });
+
+  it("disables conflicting commands while a sequence draft is open", () => {
+    const state = nativeMenuState({
+      hasActiveDocument: true,
+      activeBusy: false,
+      activeCanSave: true,
+      canUndo: true,
+      canRedo: true,
+      hasDraft: true,
+      modalOpen: false,
+      closeBusy: false,
+      activeView: "sequence",
+    });
+    expect(state).toMatchObject({ newDocument: false, openDocument: false, save: false, saveAs: false, undo: false, redo: false, changeView: false });
+    expect(state.close).toBe(false);
+  });
+
+  it("disables Close Document while a workflow sheet is active", () => {
+    const state = nativeMenuState({
+      hasActiveDocument: true,
+      activeBusy: false,
+      activeCanSave: true,
+      canUndo: false,
+      canRedo: false,
+      hasDraft: false,
+      modalOpen: true,
+      closeBusy: false,
+      activeView: "map",
+    });
+    expect(state.close).toBe(false);
+    expect(state.newDocument).toBe(false);
+    expect(state.changeView).toBe(false);
+  });
+
+  it("serializes enabled native menu item identifiers", () => {
+    expect(nativeMenuPayload({
+      newDocument: true,
+      openDocument: true,
+      save: false,
+      saveAs: true,
+      close: true,
+      undo: true,
+      redo: false,
+      changeView: true,
+      activeView: "features",
+    })).toEqual({
+      enabled: ["file.new", "file.open", "file.save-as", "file.close", "edit.undo-document", "view.map", "view.sequence", "view.features", "view.primers", "view.history"],
+      activeView: "features",
+    });
   });
 });
