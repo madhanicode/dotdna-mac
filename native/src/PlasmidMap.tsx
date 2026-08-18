@@ -3,21 +3,26 @@ import "pixi.js/unsafe-eval";
 import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
 import type { RestrictionSite } from "./restriction-sites";
 import type { SequenceSelection } from "./sequence-selection";
-import type { Feature, Topology } from "./types";
+import type { Feature, Primer, Topology } from "./types";
 
 type Props = {
   name: string;
   topology: Topology;
   sequenceLength: number;
   features: Feature[];
+  primers: Primer[];
   restrictionSites: RestrictionSite[];
   restrictionSitesTruncated: boolean;
   selection: SequenceSelection | null;
   selectedFeature: number | null;
+  selectedPrimer: number | null;
   onSelectFeature: (index: number) => void;
+  onSelectPrimer: (index: number) => void;
   onSelectRestrictionSite: (site: RestrictionSite) => void;
   zoom: number;
   showEnzymes: boolean;
+  showFeatureLabels: boolean;
+  showPrimers: boolean;
 };
 
 const muted = 0x747982;
@@ -126,6 +131,7 @@ function drawCircular(scene: Container, props: Props, width: number, height: num
     graphic.on("pointertap", () => props.onSelectFeature(featureIndex));
     scene.addChild(graphic);
 
+    if (!props.showFeatureLabels) return;
     const segment = feature.segments[0];
     if (!segment) return;
     const labelAngle = angleFor((segment.span.start + segment.span.end) / 2, props.sequenceLength);
@@ -153,6 +159,21 @@ function drawCircular(scene: Container, props: Props, width: number, height: num
     label.on("pointertap", () => props.onSelectFeature(featureIndex));
     scene.addChild(label);
   });
+
+  if (props.showPrimers) {
+    props.primers.forEach((primer, primerIndex) => {
+      const selected = props.selectedPrimer === primerIndex;
+      const graphic = new Graphics();
+      primer.binding_sites.forEach((site) => {
+        graphic.arc(cx, cy, radius - 11, angleFor(site.span.start, props.sequenceLength), angleFor(site.span.end, props.sequenceLength))
+          .stroke({ width: selected ? 7 : 4, color: numericColor(primer.color, 0x79d6e5), alpha: selected ? 1 : 0.86 });
+      });
+      graphic.eventMode = "static";
+      graphic.cursor = "pointer";
+      graphic.on("pointertap", () => props.onSelectPrimer(primerIndex));
+      scene.addChild(graphic);
+    });
+  }
 
   if (props.showEnzymes) {
     props.restrictionSites.slice(0, maximumMapRestrictionSites).forEach((site, index) => {
@@ -228,6 +249,7 @@ function drawLinear(scene: Container, props: Props, width: number, height: numbe
       graphic.on("pointertap", () => props.onSelectFeature(featureIndex));
       scene.addChild(graphic);
     });
+    if (!props.showFeatureLabels) return;
     const segment = feature.segments[0];
     if (!segment) return;
     const label = new Text({
@@ -238,6 +260,22 @@ function drawLinear(scene: Container, props: Props, width: number, height: numbe
     label.position.set(startX + (segment.span.start + segment.span.end) / 2 / Math.max(props.sequenceLength, 1) * availableWidth, centerY - 26 - (featureIndex % 4) * 14);
     scene.addChild(label);
   });
+
+  if (props.showPrimers) {
+    props.primers.forEach((primer, primerIndex) => {
+      const selected = props.selectedPrimer === primerIndex;
+      primer.binding_sites.forEach((site) => {
+        const x = startX + site.span.start / Math.max(props.sequenceLength, 1) * availableWidth;
+        const siteWidth = Math.max(3, (site.span.end - site.span.start) / Math.max(props.sequenceLength, 1) * availableWidth);
+        const marker = new Graphics().roundRect(x, centerY + 14 + (primerIndex % 3) * 8, siteWidth, selected ? 6 : 4, 2)
+          .fill({ color: numericColor(primer.color, 0x79d6e5), alpha: selected ? 1 : 0.86 });
+        marker.eventMode = "static";
+        marker.cursor = "pointer";
+        marker.on("pointertap", () => props.onSelectPrimer(primerIndex));
+        scene.addChild(marker);
+      });
+    });
+  }
 
   if (props.showEnzymes) {
     props.restrictionSites.slice(0, maximumMapRestrictionSites).forEach((site, index) => {
@@ -340,6 +378,7 @@ export function PlasmidMap(props: Props) {
           const ranges = feature.segments.map((segment) => `${segment.span.start + 1} to ${segment.span.end}`).join(", ");
           return <button aria-pressed={props.selectedFeature === index} key={`${feature.name}-${index}`} onClick={() => props.onSelectFeature(index)}>{feature.name}, {feature.kind}, {feature.strand} strand, bases {ranges}</button>;
         })}
+        {props.showPrimers && props.primers.map((primer, index) => <button aria-pressed={props.selectedPrimer === index} key={primer.id ?? `${primer.name}-${index}`} onClick={() => props.onSelectPrimer(index)}>{primer.name}, primer, bases {primer.binding_sites.map((site) => `${site.span.start + 1} to ${site.span.end}`).join(", ") || "unbound"}</button>)}
         {props.restrictionSites.slice(0, maximumMapRestrictionSites).map((site) => <button key={`${site.enzyme}-${site.position}-${site.orientation}`} onClick={() => props.onSelectRestrictionSite(site)}>{site.enzyme}, {site.orientation} site, bases {site.intervals.map((interval) => `${interval.start + 1} to ${interval.end}`).join(", ")}</button>)}
       </div>
     </div>

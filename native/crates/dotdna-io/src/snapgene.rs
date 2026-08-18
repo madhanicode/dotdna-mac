@@ -189,6 +189,7 @@ fn parse_features(document: &Document<'_>) -> Vec<Feature> {
                 .find_map(|segment| segment.color.as_ref())
                 .cloned();
             Feature {
+                id: None,
                 name: node
                     .attribute("name")
                     .unwrap_or("Unnamed feature")
@@ -264,6 +265,7 @@ fn parse_primers(document: &Document<'_>) -> (Vec<Primer>, BTreeMap<String, Stri
                 .or_else(|| node.attribute("fivePrimePhosphorylated"))
                 .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
             Primer {
+                id: None,
                 name: node
                     .attribute("name")
                     .unwrap_or("Unnamed primer")

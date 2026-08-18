@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Feature, FeatureSegment, HistoryEntry, HistoryOperation, Qualifier, SequenceDocument,
-    SequenceSpan, Strand, Topology, normalize_dna, reverse_complement,
+    Feature, FeatureSegment, HistoryEntry, HistoryOperation, PrimerBindingSite, Qualifier,
+    SequenceDocument, SequenceSpan, Strand, Topology, normalize_dna, reverse_complement,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -92,6 +92,10 @@ pub struct PcrOptions {
     pub minimum_three_prime_match: Option<usize>,
     pub maximum_mismatches: Option<usize>,
     pub minimum_overlap: Option<usize>,
+    pub forward_binding_sites: Vec<PrimerBindingSite>,
+    pub reverse_binding_sites: Vec<PrimerBindingSite>,
+    pub internal_reverse_binding_sites: Vec<PrimerBindingSite>,
+    pub internal_forward_binding_sites: Vec<PrimerBindingSite>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -150,6 +154,31 @@ pub enum PcrError {
     InvalidPrimer,
     #[error("the 3′ template-binding region must be between 1 and {primer_length} bases")]
     InvalidBindingLength { primer_length: usize },
+    #[error(
+        "the {binding_length}-base 3′ binding region is longer than the {template_length}-base template"
+    )]
+    BindingRegionLongerThanTemplate {
+        binding_length: usize,
+        template_length: usize,
+    },
+    #[error(
+        "the {primer_role} primer has more than {limit} candidate binding sites; lengthen its 3′ binding region before PCR"
+    )]
+    TooManyBindingSites {
+        primer_role: &'static str,
+        limit: usize,
+    },
+    #[error("primer length {length} exceeds the {maximum}-base analysis limit")]
+    PrimerTooLong { length: usize, maximum: usize },
+    #[error("the stored {primer_role} primer site no longer matches this template")]
+    StoredBindingSiteNotFound { primer_role: &'static str },
+    #[error(
+        "the {primer_role} primer has {candidate_count} usable sites; choose and store one before PCR"
+    )]
+    BindingSiteSelectionRequired {
+        primer_role: &'static str,
+        candidate_count: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -268,16 +297,41 @@ fn longest_complementary_run(left: &str, right: &str) -> usize {
 }
 
 fn hairpin_score(sequence: &str) -> usize {
+    fn complementary(left: u8, right: u8) -> bool {
+        matches!(
+            (left, right),
+            (b'A', b'T') | (b'T', b'A') | (b'C', b'G') | (b'G', b'C')
+        )
+    }
+
+    let bases = sequence.as_bytes();
+    let mut stems = vec![vec![0_u16; bases.len()]; bases.len()];
     let mut longest = 0;
-    for left_end in 3..sequence.len().saturating_sub(3) {
-        for right_start in left_end + 3..sequence.len() {
-            longest = longest.max(longest_complementary_run(
-                &sequence[..left_end],
-                &sequence[right_start..],
-            ));
+    for left in (0..bases.len()).rev() {
+        for right in left + 1..bases.len() {
+            if !complementary(bases[left], bases[right]) {
+                continue;
+            }
+            let inward = if left + 1 < bases.len() && right > 0 {
+                stems[left + 1][right - 1]
+            } else {
+                0
+            };
+            stems[left][right] = inward.saturating_add(1);
+            // Leave at least three unpaired bases in the hairpin loop.
+            let maximum_stem = right.saturating_sub(left + 2) / 2;
+            longest = longest.max(usize::from(stems[left][right]).min(maximum_stem));
         }
     }
     longest
+}
+
+fn normalize_primer(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .map(|character| character.to_ascii_uppercase())
+        .collect()
 }
 
 /// Scores the explicit 3′ template-binding segment separately from any 5′ tail.
@@ -290,7 +344,14 @@ pub fn analyze_primer(
     binding_length: Option<usize>,
     conditions: ThermodynamicConditions,
 ) -> Result<PrimerAnalysis, PcrError> {
-    let sequence = normalize_dna(value);
+    const MAX_PRIMER_LENGTH: usize = 500;
+    let sequence = normalize_primer(value);
+    if sequence.len() > MAX_PRIMER_LENGTH {
+        return Err(PcrError::PrimerTooLong {
+            length: sequence.len(),
+            maximum: MAX_PRIMER_LENGTH,
+        });
+    }
     if sequence.is_empty()
         || !sequence
             .bytes()
@@ -435,7 +496,8 @@ fn find_primer_bindings_with_options(
     primer_value: &str,
     circular: bool,
     options: BindingOptions,
-) -> Result<Vec<PrimerBinding>, PcrError> {
+    maximum_results: Option<usize>,
+) -> Result<(Vec<PrimerBinding>, bool), PcrError> {
     let template = normalize_dna(template_value);
     if template.is_empty() {
         return Err(PcrError::TemplateRequired);
@@ -448,6 +510,14 @@ fn find_primer_bindings_with_options(
             primer_length: primer.len(),
         });
     }
+    if let Some(binding_length) = options.binding_length
+        && binding_length > template.len()
+    {
+        return Err(PcrError::BindingRegionLongerThanTemplate {
+            binding_length,
+            template_length: template.len(),
+        });
+    }
     let minimum_length = options.binding_length.unwrap_or_else(|| {
         primer
             .len()
@@ -455,7 +525,8 @@ fn find_primer_bindings_with_options(
     });
     let maximum_length = options.binding_length.unwrap_or(primer.len());
     let mut best_by_anchor = BTreeMap::<(BindingStrand, usize), PrimerBinding>::new();
-    for length in (minimum_length..=maximum_length).rev() {
+    let bounded = maximum_results.filter(|limit| *limit > 0);
+    'lengths: for length in (minimum_length..=maximum_length).rev() {
         if !circular && length > template.len() {
             continue;
         }
@@ -482,13 +553,20 @@ fn find_primer_bindings_with_options(
                 });
                 if replace {
                     best_by_anchor.insert(anchor, binding);
+                    if bounded.is_some_and(|limit| best_by_anchor.len() > limit) {
+                        break 'lengths;
+                    }
                 }
             }
         }
     }
     let mut bindings: Vec<_> = best_by_anchor.into_values().collect();
     bindings.sort_by_key(|binding| (binding.span.start, binding.strand));
-    Ok(bindings)
+    let truncated = maximum_results.is_some_and(|limit| bindings.len() > limit);
+    if let Some(limit) = maximum_results {
+        bindings.truncate(limit);
+    }
+    Ok((bindings, truncated))
 }
 
 /// Finds acceptable bindings while preserving an explicit 3′ binding length.
@@ -514,6 +592,37 @@ pub fn find_primer_bindings(
             maximum_mismatches,
             ..BindingOptions::default()
         },
+        None,
+    )
+    .map(|(bindings, _)| bindings)
+}
+
+/// Finds at most `maximum_results` acceptable bindings for interactive design surfaces.
+///
+/// The boolean result is true when additional bindings were omitted. An explicit binding length
+/// keeps the bounded scan deterministic and prevents an ambiguous short primer from materializing
+/// millions of candidate objects.
+///
+/// # Errors
+///
+/// Returns an error for an empty template, ambiguous primer, invalid binding length, or a binding
+/// region longer than its template.
+pub fn find_primer_bindings_limited(
+    template: &str,
+    primer: &str,
+    circular: bool,
+    binding_length: usize,
+    maximum_results: usize,
+) -> Result<(Vec<PrimerBinding>, bool), PcrError> {
+    find_primer_bindings_with_options(
+        template,
+        primer,
+        circular,
+        BindingOptions {
+            binding_length: Some(binding_length),
+            ..BindingOptions::default()
+        },
+        Some(maximum_results),
     )
 }
 
@@ -612,6 +721,91 @@ fn binding_options(length: Option<usize>, options: &PcrOptions) -> BindingOption
     }
 }
 
+fn binding_matches_stored_sites(
+    binding: &PrimerBinding,
+    sites: &[PrimerBindingSite],
+    template_length: usize,
+) -> bool {
+    let strand = match binding.strand {
+        BindingStrand::Forward => Strand::Forward,
+        BindingStrand::Reverse => Strand::Reverse,
+    };
+    if binding.wraps_origin {
+        sites.iter().any(|site| {
+            site.strand == strand
+                && site.span == SequenceSpan::new(binding.span.start, template_length)
+        }) && sites.iter().any(|site| {
+            site.strand == strand && site.span == SequenceSpan::new(0, binding.span.end)
+        })
+    } else {
+        sites
+            .iter()
+            .any(|site| site.strand == strand && site.span == binding.span)
+    }
+}
+
+fn constrain_primer_bindings(
+    mut bindings: Vec<PrimerBinding>,
+    stored_sites: &[PrimerBindingSite],
+    required_strand: BindingStrand,
+    primer_role: &'static str,
+    template_length: usize,
+) -> Result<Vec<PrimerBinding>, PcrError> {
+    bindings.retain(|binding| {
+        binding.strand == required_strand
+            && (stored_sites.is_empty()
+                || binding_matches_stored_sites(binding, stored_sites, template_length))
+    });
+    if !stored_sites.is_empty() && bindings.is_empty() {
+        return Err(PcrError::StoredBindingSiteNotFound { primer_role });
+    }
+    if bindings.len() > 1 {
+        return Err(PcrError::BindingSiteSelectionRequired {
+            primer_role,
+            candidate_count: bindings.len(),
+        });
+    }
+    Ok(bindings)
+}
+
+fn primer_length(value: &str, binding_length: Option<usize>) -> Result<usize, PcrError> {
+    Ok(analyze_primer(value, binding_length, ThermodynamicConditions::default())?.length)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pcr_bindings_for_role(
+    template: &str,
+    primer: &str,
+    circular: bool,
+    binding_length: Option<usize>,
+    options: &PcrOptions,
+    stored_sites: &[PrimerBindingSite],
+    strand: BindingStrand,
+    primer_role: &'static str,
+) -> Result<(Vec<PrimerBinding>, usize), PcrError> {
+    const MAX_PCR_BINDINGS_PER_PRIMER: usize = 256;
+    let (bindings, truncated) = find_primer_bindings_with_options(
+        template,
+        primer,
+        circular,
+        binding_options(binding_length, options),
+        Some(MAX_PCR_BINDINGS_PER_PRIMER),
+    )?;
+    if truncated {
+        return Err(PcrError::TooManyBindingSites {
+            primer_role,
+            limit: MAX_PCR_BINDINGS_PER_PRIMER,
+        });
+    }
+    let candidate_count = bindings
+        .iter()
+        .filter(|binding| binding.strand == strand)
+        .count();
+    let bindings =
+        constrain_primer_bindings(bindings, stored_sites, strand, primer_role, template.len())?;
+    Ok((bindings, candidate_count))
+}
+
 fn build_pcr_product(
     template: &str,
     forward_primer_value: &str,
@@ -695,6 +889,29 @@ fn build_pcr_product(
     }))
 }
 
+fn pcr_product_length(
+    template_length: usize,
+    forward_primer_length: usize,
+    reverse_primer_length: usize,
+    forward: &PrimerBinding,
+    reverse: &PrimerBinding,
+    circular: bool,
+) -> Option<usize> {
+    let forward_end = forward.span.start + forward.binding_length;
+    let mut reverse_start = reverse.span.start;
+    if circular && reverse_start < forward_end {
+        reverse_start += template_length;
+    }
+    if reverse_start < forward_end {
+        return None;
+    }
+    let internal_length = reverse_start - forward_end;
+    if circular && internal_length > template_length - forward.binding_length {
+        return None;
+    }
+    Some(forward_primer_length + internal_length + reverse_primer_length)
+}
+
 fn deduplicate(values: Vec<String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     values
@@ -719,36 +936,52 @@ pub fn simulate_pcr(
     if template.is_empty() {
         return Err(PcrError::TemplateRequired);
     }
-    let forward_bindings = find_primer_bindings_with_options(
+    let (forward_bindings, forward_binding_count) = pcr_bindings_for_role(
         &template,
         forward_primer,
         circular,
-        binding_options(options.forward_binding_length, options),
+        options.forward_binding_length,
+        options,
+        &options.forward_binding_sites,
+        BindingStrand::Forward,
+        "forward",
     )?;
-    let reverse_bindings = find_primer_bindings_with_options(
+    let (reverse_bindings, reverse_binding_count) = pcr_bindings_for_role(
         &template,
         reverse_primer,
         circular,
-        binding_options(options.reverse_binding_length, options),
+        options.reverse_binding_length,
+        options,
+        &options.reverse_binding_sites,
+        BindingStrand::Reverse,
+        "reverse",
     )?;
-    let forward_binding_count = forward_bindings
+    let forward_primer_length = primer_length(forward_primer, options.forward_binding_length)?;
+    let reverse_primer_length = primer_length(reverse_primer, options.reverse_binding_length)?;
+    let template_length = template.len();
+    let best_pair = forward_bindings
         .iter()
         .filter(|binding| binding.strand == BindingStrand::Forward)
-        .count();
-    let reverse_binding_count = reverse_bindings
-        .iter()
-        .filter(|binding| binding.strand == BindingStrand::Reverse)
-        .count();
-    let mut products = Vec::new();
-    for forward in forward_bindings
-        .iter()
-        .filter(|binding| binding.strand == BindingStrand::Forward)
-    {
-        for reverse in reverse_bindings
-            .iter()
-            .filter(|binding| binding.strand == BindingStrand::Reverse)
-        {
-            if let Some(product) = build_pcr_product(
+        .flat_map(|forward| {
+            reverse_bindings
+                .iter()
+                .filter(|binding| binding.strand == BindingStrand::Reverse)
+                .filter_map(move |reverse| {
+                    pcr_product_length(
+                        template_length,
+                        forward_primer_length,
+                        reverse_primer_length,
+                        forward,
+                        reverse,
+                        circular,
+                    )
+                    .map(|length| ((length, forward.span.start), forward, reverse))
+                })
+        })
+        .min_by_key(|(key, _, _)| *key);
+    let mut product = best_pair
+        .map(|(_, forward, reverse)| {
+            build_pcr_product(
                 &template,
                 forward_primer,
                 reverse_primer,
@@ -756,13 +989,10 @@ pub fn simulate_pcr(
                 reverse.clone(),
                 PcrMode::Standard,
                 circular,
-            )? {
-                products.push(product);
-            }
-        }
-    }
-    products.sort_by_key(|product| (product.length, product.template_start));
-    let mut product = products.into_iter().next();
+            )
+        })
+        .transpose()?
+        .flatten();
     if let Some(product) = product.as_mut() {
         if forward_binding_count > 1 {
             product.warnings.push(format!(
@@ -794,39 +1024,55 @@ pub fn simulate_inverse_pcr(
     if template.is_empty() {
         return Err(PcrError::TemplateRequired);
     }
-    let forward_bindings = find_primer_bindings_with_options(
+    let (forward_bindings, forward_binding_count) = pcr_bindings_for_role(
         &template,
         forward_primer,
         true,
-        binding_options(options.forward_binding_length, options),
+        options.forward_binding_length,
+        options,
+        &options.forward_binding_sites,
+        BindingStrand::Forward,
+        "forward",
     )?;
-    let reverse_bindings = find_primer_bindings_with_options(
+    let (reverse_bindings, reverse_binding_count) = pcr_bindings_for_role(
         &template,
         reverse_primer,
         true,
-        binding_options(options.reverse_binding_length, options),
+        options.reverse_binding_length,
+        options,
+        &options.reverse_binding_sites,
+        BindingStrand::Reverse,
+        "reverse",
     )?;
-    let forward_binding_count = forward_bindings
+    let forward_primer_length = primer_length(forward_primer, options.forward_binding_length)?;
+    let reverse_primer_length = primer_length(reverse_primer, options.reverse_binding_length)?;
+    let template_length = template.len();
+    let best_pair = forward_bindings
         .iter()
         .filter(|binding| binding.strand == BindingStrand::Forward)
-        .count();
-    let reverse_binding_count = reverse_bindings
-        .iter()
-        .filter(|binding| binding.strand == BindingStrand::Reverse)
-        .count();
-    let mut products = Vec::new();
-    for forward in forward_bindings
-        .iter()
-        .filter(|binding| binding.strand == BindingStrand::Forward)
-    {
-        for reverse in reverse_bindings
-            .iter()
-            .filter(|binding| binding.strand == BindingStrand::Reverse)
-        {
-            if reverse.span.start >= forward.span.start {
-                continue;
-            }
-            if let Some(mut product) = build_pcr_product(
+        .flat_map(|forward| {
+            reverse_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.strand == BindingStrand::Reverse
+                        && binding.span.start < forward.span.start
+                })
+                .filter_map(move |reverse| {
+                    pcr_product_length(
+                        template_length,
+                        forward_primer_length,
+                        reverse_primer_length,
+                        forward,
+                        reverse,
+                        true,
+                    )
+                    .map(|length| ((length, forward.span.start), forward, reverse))
+                })
+        })
+        .min_by_key(|(key, _, _)| *key);
+    let mut product = best_pair
+        .map(|(_, forward, reverse)| {
+            build_pcr_product(
                 &template,
                 forward_primer,
                 reverse_primer,
@@ -834,19 +1080,16 @@ pub fn simulate_inverse_pcr(
                 reverse.clone(),
                 PcrMode::Inverse,
                 true,
-            )? && product.wraps_origin
-            {
-                product.warnings.push(
-                    "Inverse-PCR output is a linear amplicon; circularization or assembly is still required to make a plasmid."
-                        .to_owned(),
-                );
-                products.push(product);
-            }
-        }
-    }
-    products.sort_by_key(|product| (product.length, product.template_start));
-    let mut product = products.into_iter().next();
+            )
+        })
+        .transpose()?
+        .flatten()
+        .filter(|product| product.wraps_origin);
     if let Some(product) = product.as_mut() {
+        product.warnings.push(
+            "Inverse-PCR output is a linear amplicon; circularization or assembly is still required to make a plasmid."
+                .to_owned(),
+        );
         if forward_binding_count > 1 || reverse_binding_count > 1 {
             product.warnings.push(format!(
                 "The outward primer pair has {forward_binding_count} forward and {reverse_binding_count} reverse candidate bindings; make both 3′ regions unique before cycling."
@@ -907,6 +1150,9 @@ pub fn simulate_overlap_extension_pcr(
 ) -> Result<Option<PcrProduct>, PcrError> {
     let mut left_options = options.clone();
     left_options.reverse_binding_length = options.internal_reverse_binding_length;
+    left_options
+        .reverse_binding_sites
+        .clone_from(&options.internal_reverse_binding_sites);
     let Some(left) = simulate_pcr(
         template_value,
         outer_forward_primer,
@@ -919,6 +1165,9 @@ pub fn simulate_overlap_extension_pcr(
     };
     let mut right_options = options.clone();
     right_options.forward_binding_length = options.internal_forward_binding_length;
+    right_options
+        .forward_binding_sites
+        .clone_from(&options.internal_forward_binding_sites);
     let Some(right) = simulate_pcr(
         template_value,
         internal_forward_primer,
@@ -1016,6 +1265,7 @@ impl PcrProduct {
                     PcrFeatureType::Overlap => ("overlap", "#ae7ad8"),
                 };
                 Feature {
+                    id: None,
                     name: feature.name.clone(),
                     kind: kind.to_owned(),
                     color: Some(color.to_owned()),
@@ -1072,6 +1322,103 @@ mod tests {
         assert!((analysis.gc_percent - 50.0).abs() < f64::EPSILON);
         assert!(analysis.melting_temperature > 55.0 && analysis.melting_temperature < 61.0);
         assert!(analysis.enthalpy < -150.0);
+    }
+
+    #[test]
+    fn interactive_binding_search_is_bounded_and_rejects_multiple_circular_laps() {
+        let template = "A".repeat(1_000);
+        let (bindings, truncated) =
+            find_primer_bindings_limited(&template, "A", false, 1, 100).unwrap();
+        assert_eq!(bindings.len(), 100);
+        assert!(truncated);
+
+        assert_eq!(
+            find_primer_bindings_limited("AAAAAAAAAA", &"A".repeat(20), true, 20, 100).unwrap_err(),
+            PcrError::BindingRegionLongerThanTemplate {
+                binding_length: 20,
+                template_length: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn pcr_rejects_highly_ambiguous_primers_before_pairing_candidates() {
+        let options = PcrOptions {
+            forward_binding_length: Some(1),
+            reverse_binding_length: Some(1),
+            ..PcrOptions::default()
+        };
+        assert_eq!(
+            simulate_pcr(&"A".repeat(1_000), "A", "T", false, &options).unwrap_err(),
+            PcrError::TooManyBindingSites {
+                primer_role: "forward",
+                limit: 256,
+            }
+        );
+    }
+
+    #[test]
+    fn pcr_requires_and_honors_a_stored_site_for_a_multi_site_primer() {
+        let forward = "ACGTTGCAAGTCGATCGTAC";
+        let reverse_target = "TTGACCGATGCTAGCTAGGA";
+        let template = format!("{forward}CCCC{reverse_target}GGGG{forward}");
+        let reverse_primer = reverse(reverse_target);
+        let mut options = PcrOptions {
+            forward_binding_length: Some(20),
+            reverse_binding_length: Some(20),
+            ..PcrOptions::default()
+        };
+        assert!(matches!(
+            simulate_pcr(&template, forward, &reverse_primer, false, &options),
+            Err(PcrError::BindingSiteSelectionRequired {
+                primer_role: "forward",
+                ..
+            })
+        ));
+
+        options.forward_binding_sites = vec![PrimerBindingSite {
+            span: SequenceSpan::new(0, 20),
+            strand: Strand::Forward,
+        }];
+        let product = simulate_pcr(&template, forward, &reverse_primer, false, &options)
+            .unwrap()
+            .unwrap();
+        assert_eq!(product.template_start, 0);
+
+        options.forward_binding_sites[0].span = SequenceSpan::new(48, 68);
+        assert!(
+            simulate_pcr(&template, forward, &reverse_primer, false, &options)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn primer_analysis_rejects_silent_substitutions_and_bounds_structure_scoring() {
+        assert_eq!(
+            analyze_primer("ACGU", Some(4), ThermodynamicConditions::default()).unwrap_err(),
+            PcrError::InvalidPrimer
+        );
+        assert_eq!(
+            analyze_primer("ACG1T", Some(4), ThermodynamicConditions::default()).unwrap_err(),
+            PcrError::InvalidPrimer
+        );
+        let long = "ACGT".repeat(125);
+        let analysis =
+            analyze_primer(&long, Some(long.len()), ThermodynamicConditions::default()).unwrap();
+        assert_eq!(analysis.length, 500);
+        assert_eq!(
+            analyze_primer(
+                &format!("{long}A"),
+                Some(501),
+                ThermodynamicConditions::default()
+            )
+            .unwrap_err(),
+            PcrError::PrimerTooLong {
+                length: 501,
+                maximum: 500,
+            }
+        );
     }
 
     #[test]

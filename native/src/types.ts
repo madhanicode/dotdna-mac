@@ -19,6 +19,7 @@ export type Qualifier = {
 };
 
 export type Feature = {
+  id?: string | null;
   name: string;
   kind: string;
   color: string | null;
@@ -34,6 +35,7 @@ export type PrimerBindingSite = {
 };
 
 export type Primer = {
+  id?: string | null;
   name: string;
   sequence: string;
   binding_length: number | null;
@@ -137,6 +139,7 @@ export type PrimerCheck = {
   action: string | null;
   analysis: PrimerAnalysis | null;
   bindings: PrimerBinding[];
+  bindingsTruncated: boolean;
 };
 
 export type PcrProduct = {

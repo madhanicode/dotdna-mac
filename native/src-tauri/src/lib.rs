@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dotdna_core::{
-    DocumentDiagnostic, OpenReadingFrame, OrfAnalysisResult, OrfTranslation, PcrOptions,
-    PcrProduct, PrimerAnalysis, PrimerBinding, SequenceDocument, SequenceMatch,
+    DocumentDiagnostic, Feature, OpenReadingFrame, OrfAnalysisResult, OrfTranslation, PcrOptions,
+    PcrProduct, Primer, PrimerAnalysis, PrimerBinding, SequenceDocument, SequenceMatch,
     ThermodynamicConditions, Topology, analyze_orfs_with_status, analyze_primer,
-    find_primer_bindings, find_sequence_matches, simulate_inverse_pcr as run_inverse_pcr,
+    find_primer_bindings_limited, find_sequence_matches, simulate_inverse_pcr as run_inverse_pcr,
     simulate_overlap_extension_pcr as run_overlap_extension_pcr, simulate_pcr as run_standard_pcr,
     translate_open_reading_frame,
 };
@@ -138,6 +138,50 @@ struct FindSequenceRequest {
     maximum_results: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum DocumentMutation {
+    CreateFeature {
+        feature: Feature,
+    },
+    ReplaceFeature {
+        index: usize,
+        expected: Feature,
+        replacement: Feature,
+    },
+    DeleteFeature {
+        index: usize,
+        expected: Feature,
+    },
+    CreatePrimer {
+        primer: Primer,
+    },
+    ReplacePrimer {
+        index: usize,
+        expected: Primer,
+        replacement: Primer,
+    },
+    DeletePrimer {
+        index: usize,
+        expected: Primer,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentMutationRequest {
+    document: SequenceDocument,
+    mutation: DocumentMutation,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentMutationResult {
+    summary: DocumentSummary,
+    changed: bool,
+    entity_index: Option<usize>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PrimerCheckResult {
@@ -147,6 +191,7 @@ struct PrimerCheckResult {
     action: Option<String>,
     analysis: Option<PrimerAnalysis>,
     bindings: Vec<PrimerBinding>,
+    bindings_truncated: bool,
 }
 
 impl DocumentSummary {
@@ -556,6 +601,7 @@ async fn simulate_pcr_product(
 }
 
 fn analyze_document_primers_blocking(request: PrimerCheckRequest) -> Vec<PrimerCheckResult> {
+    const MAX_INTERACTIVE_BINDINGS: usize = 100;
     request
         .primers
         .into_iter()
@@ -565,19 +611,22 @@ fn analyze_document_primers_blocking(request: PrimerCheckRequest) -> Vec<PrimerC
                 primer.binding_length,
                 ThermodynamicConditions::default(),
             );
-            let bindings = primer
-                .binding_length
-                .map_or_else(Vec::new, |binding_length| {
-                    find_primer_bindings(
+            let binding_result = primer.binding_length.map_or_else(
+                || Ok((Vec::new(), false)),
+                |binding_length| {
+                    find_primer_bindings_limited(
                         &request.template_sequence,
                         &primer.sequence,
                         request.circular,
-                        Some(binding_length),
-                        None,
-                        None,
+                        binding_length,
+                        MAX_INTERACTIVE_BINDINGS,
                     )
-                    .unwrap_or_default()
-                });
+                },
+            );
+            let (bindings, bindings_truncated, binding_error) = match binding_result {
+                Ok((bindings, truncated)) => (bindings, truncated, None),
+                Err(error) => (Vec::new(), false, Some(error)),
+            };
             let (status, headline, action) = if primer.binding_length.is_none() {
                 (
                     "needs-binding-region",
@@ -590,11 +639,25 @@ fn analyze_document_primers_blocking(request: PrimerCheckRequest) -> Vec<PrimerC
                     "Primer sequence is invalid".to_owned(),
                     Some("Use only unambiguous A, C, G, and T bases.".to_owned()),
                 )
+            } else if let Some(error) = binding_error {
+                (
+                    "invalid",
+                    error.to_string(),
+                    Some(
+                        "Shorten the 3′ binding region so it fits within the template.".to_owned(),
+                    ),
+                )
             } else if bindings.is_empty() {
                 (
                     "no-binding",
                     "No validated template binding".to_owned(),
                     Some("Verify the sequence and preserve an exact 3′ terminal match.".to_owned()),
+                )
+            } else if bindings_truncated {
+                (
+                    "multiple-bindings",
+                    format!("More than {MAX_INTERACTIVE_BINDINGS} possible template bindings"),
+                    Some("Lengthen or move the 3′ binding region to make it unique.".to_owned()),
                 )
             } else if bindings.len() > 1 {
                 (
@@ -612,6 +675,7 @@ fn analyze_document_primers_blocking(request: PrimerCheckRequest) -> Vec<PrimerC
                 action,
                 analysis: analysis.ok(),
                 bindings,
+                bindings_truncated,
             }
         })
         .collect()
@@ -696,6 +760,93 @@ async fn replace_document_sequence(
     })
     .await
     .map_err(|error| format!("The sequence editor stopped unexpectedly: {error}"))?
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn apply_document_mutation_blocking(
+    request: DocumentMutationRequest,
+) -> Result<DocumentMutationResult, String> {
+    let mut document = request.document;
+    let before = document.clone();
+    let entity_index = match request.mutation {
+        DocumentMutation::CreateFeature { feature } => Some(
+            document
+                .upsert_feature(None, feature)
+                .map_err(|error| error.to_string())?,
+        ),
+        DocumentMutation::ReplaceFeature {
+            index,
+            expected,
+            replacement,
+        } => {
+            if document.features.get(index) != Some(&expected) {
+                return Err("The feature changed before this edit could be applied. Reopen the feature sheet and try again.".to_owned());
+            }
+            Some(
+                document
+                    .upsert_feature(Some(index), replacement)
+                    .map_err(|error| error.to_string())?,
+            )
+        }
+        DocumentMutation::DeleteFeature { index, expected } => {
+            if document.features.get(index) != Some(&expected) {
+                return Err("The feature changed before it could be removed. Reopen the feature list and try again.".to_owned());
+            }
+            document
+                .remove_feature(index)
+                .map_err(|error| error.to_string())?;
+            None
+        }
+        DocumentMutation::CreatePrimer { primer } => Some(
+            document
+                .upsert_primer(None, primer)
+                .map_err(|error| error.to_string())?,
+        ),
+        DocumentMutation::ReplacePrimer {
+            index,
+            expected,
+            mut replacement,
+        } => {
+            if document.primers.get(index) != Some(&expected) {
+                return Err("The primer changed before this edit could be applied. Reopen the primer sheet and try again.".to_owned());
+            }
+            if (replacement.sequence != expected.sequence
+                || replacement.binding_length != expected.binding_length)
+                && replacement.binding_sites == expected.binding_sites
+            {
+                replacement.binding_sites.clear();
+            }
+            Some(
+                document
+                    .upsert_primer(Some(index), replacement)
+                    .map_err(|error| error.to_string())?,
+            )
+        }
+        DocumentMutation::DeletePrimer { index, expected } => {
+            if document.primers.get(index) != Some(&expected) {
+                return Err("The primer changed before it could be removed. Reopen the primer list and try again.".to_owned());
+            }
+            document
+                .remove_primer(index)
+                .map_err(|error| error.to_string())?;
+            None
+        }
+    };
+    let changed = document != before;
+    Ok(DocumentMutationResult {
+        summary: DocumentSummary::new(None, "Edited DNA", document),
+        changed,
+        entity_index,
+    })
+}
+
+#[tauri::command]
+async fn apply_document_mutation(
+    request: DocumentMutationRequest,
+) -> Result<DocumentMutationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || apply_document_mutation_blocking(request))
+        .await
+        .map_err(|error| format!("The annotation worker stopped unexpectedly: {error}"))?
 }
 
 fn build_application_submenu<R: tauri::Runtime>(
@@ -978,6 +1129,7 @@ pub fn run() {
             translate_selected_open_reading_frame,
             find_sequence,
             replace_document_sequence,
+            apply_document_mutation,
             update_native_menu_state
         ])
         .run(tauri::generate_context!())
@@ -1038,6 +1190,91 @@ mod tests {
                 .unwrap()
                 .sequence,
             "AAAACCCC"
+        );
+    }
+
+    fn test_feature() -> Feature {
+        Feature {
+            id: Some("feature-1".to_owned()),
+            name: "promoter".to_owned(),
+            kind: "promoter".to_owned(),
+            color: Some("#5cc8d7".to_owned()),
+            strand: dotdna_core::Strand::Forward,
+            segments: vec![dotdna_core::FeatureSegment {
+                span: dotdna_core::SequenceSpan::new(1, 5),
+                color: None,
+                name: None,
+                kind: None,
+            }],
+            qualifiers: Vec::new(),
+            reading_frame: None,
+        }
+    }
+
+    fn test_primer() -> Primer {
+        Primer {
+            id: Some("primer-1".to_owned()),
+            name: "forward".to_owned(),
+            sequence: "GGATCCACGT".to_owned(),
+            binding_length: Some(4),
+            description: Some("tail plus binding".to_owned()),
+            color: Some("#79d6e5".to_owned()),
+            phosphorylated: false,
+            binding_sites: vec![dotdna_core::PrimerBindingSite {
+                span: dotdna_core::SequenceSpan::new(2, 6),
+                strand: dotdna_core::Strand::Forward,
+            }],
+        }
+    }
+
+    #[test]
+    fn native_boundary_applies_atomic_feature_mutations_and_rejects_stale_targets() {
+        let document = SequenceDocument::new("edit", "AACGTACGTT").unwrap();
+        let created = apply_document_mutation_blocking(DocumentMutationRequest {
+            document,
+            mutation: DocumentMutation::CreateFeature {
+                feature: test_feature(),
+            },
+        })
+        .unwrap();
+        assert!(created.changed);
+        assert_eq!(created.entity_index, Some(0));
+        assert_eq!(created.summary.document.history.len(), 1);
+
+        let stale = apply_document_mutation_blocking(DocumentMutationRequest {
+            document: created.summary.document,
+            mutation: DocumentMutation::ReplaceFeature {
+                index: 0,
+                expected: Feature {
+                    name: "stale".to_owned(),
+                    ..test_feature()
+                },
+                replacement: test_feature(),
+            },
+        });
+        assert!(stale.unwrap_err().contains("changed before"));
+    }
+
+    #[test]
+    fn native_boundary_clears_stale_primer_sites_when_binding_changes() {
+        let mut document = SequenceDocument::new("edit", "AACGTACGTT").unwrap();
+        document.primers.push(test_primer());
+        let expected = document.primers[0].clone();
+        let mut replacement = expected.clone();
+        replacement.sequence = "TTTTACGT".to_owned();
+        let result = apply_document_mutation_blocking(DocumentMutationRequest {
+            document,
+            mutation: DocumentMutation::ReplacePrimer {
+                index: 0,
+                expected,
+                replacement,
+            },
+        })
+        .unwrap();
+        assert!(result.summary.document.primers[0].binding_sites.is_empty());
+        assert_eq!(
+            result.summary.document.history.last().unwrap().operation,
+            dotdna_core::HistoryOperation::Primer
         );
     }
 

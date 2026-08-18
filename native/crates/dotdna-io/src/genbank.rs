@@ -177,6 +177,7 @@ fn parse_features(text: &str) -> Vec<Feature> {
                 );
             let reverse = record.location.to_ascii_lowercase().contains("complement(");
             Feature {
+                id: None,
                 name: qualifier_value(&qualifiers, "label")
                     .or_else(|| qualifier_value(&qualifiers, "gene"))
                     .or_else(|| qualifier_value(&qualifiers, "product"))
@@ -366,6 +367,7 @@ mod tests {
         let mut source = SequenceDocument::new("source.fa", "ATGAAATAA").unwrap();
         source.topology = Topology::Circular;
         source.features.push(Feature {
+            id: None,
             name: "demo CDS".to_owned(),
             kind: "CDS".to_owned(),
             color: Some("#ff9900".to_owned()),

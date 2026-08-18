@@ -1,6 +1,6 @@
 import type { SequenceSpan, Strand } from "./types";
 
-export type SelectionSource = "feature" | "restriction" | "find" | "orf";
+export type SelectionSource = "feature" | "primer" | "restriction" | "find" | "orf";
 
 export type SequenceSelection = {
   documentId: string;

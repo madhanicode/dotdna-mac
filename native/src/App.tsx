@@ -3,13 +3,14 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
+import { FeatureEditor, PrimerEditor } from "./AnnotationEditors";
 import { demoDocument } from "./demo";
 import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nativeMenuPayload, nativeMenuState, nextUntitledName } from "./document-workflows";
 import { scanRestrictionSites, type RestrictionSite } from "./restriction-sites";
 import { SequenceView } from "./SequenceView";
 import { displayIntervals, normalizeIntervals, selectionLength, validateFindQuery, type SequenceMatch, type SequenceSelection } from "./sequence-selection";
-import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, OpenReadingFrame, OrfTranslation, PcrCommandResult, PrimerCheck, SequenceDocument } from "./types";
+import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, OpenReadingFrame, OrfTranslation, PcrCommandResult, Primer, PrimerCheck, SequenceDocument } from "./types";
 
 const PlasmidMap = lazy(() => import("./PlasmidMap").then((module) => ({ default: module.PlasmidMap })));
 
@@ -38,6 +39,15 @@ type SavePathResolution = { path: string; fileVersion: string | null };
 type OrfAnalysisState = { revision: number; minimumAminoAcids: number; loading: boolean; error: string | null; truncated: boolean; items: OpenReadingFrame[] };
 type OrfAnalysisResponse = { orfs: OpenReadingFrame[]; truncated: boolean };
 type FindAnalysisState = { revision: number; query: string; loading: boolean; error: string | null; capped: boolean; matches: SequenceMatch[] };
+type AnnotationEditorState = { kind: "feature" | "primer"; documentId: string; revision: number; index: number | null };
+type DocumentMutationResult = { summary: DocumentSummary; changed: boolean; entityIndex: number | null };
+type DocumentMutation =
+  | { kind: "create-feature"; feature: Feature }
+  | { kind: "replace-feature"; index: number; expected: Feature; replacement: Feature }
+  | { kind: "delete-feature"; index: number; expected: Feature }
+  | { kind: "create-primer"; primer: Primer }
+  | { kind: "replace-primer"; index: number; expected: Primer; replacement: Primer }
+  | { kind: "delete-primer"; index: number; expected: Primer };
 
 const MAX_FIND_MATCHES = 50_000;
 
@@ -63,7 +73,12 @@ function documentId(summary: DocumentSummary) {
 }
 
 function asOpenDocument(summary: DocumentSummary): OpenDocument {
-  return { ...summary, id: documentId(summary), dirty: false, view: "map", revision: 0 };
+  const document = {
+    ...summary.document,
+    features: summary.document.features.map((feature) => ({ ...feature, id: feature.id ?? crypto.randomUUID() })),
+    primers: summary.document.primers.map((primer) => ({ ...primer, id: primer.id ?? crypto.randomUUID() })),
+  };
+  return { ...summary, document, id: documentId(summary), dirty: false, view: "map", revision: 0 };
 }
 
 function cutBoundaryLabel(position: number | null) {
@@ -96,7 +111,7 @@ function Icon({ name }: { name: string }) {
 
 function ToolButton({ icon, label, disabled, disabledReason, onClick, active }: { icon: string; label: string; disabled?: boolean; disabledReason?: string; onClick?: () => void; active?: boolean }) {
   return (
-    <button className={`tool-button${active ? " active" : ""}`} disabled={disabled} onClick={onClick} title={disabled && disabledReason ? disabledReason : label}>
+    <button aria-pressed={active ?? undefined} className={`tool-button${active ? " active" : ""}`} disabled={disabled} onClick={onClick} title={disabled && disabledReason ? disabledReason : label}>
       <Icon name={icon} />
       <span>{label}</span>
     </button>
@@ -114,10 +129,15 @@ function EmptyWorkspace({ onNew, onOpen }: { onNew: () => void; onOpen: () => vo
   );
 }
 
-function FeatureTable({ features, selected, onSelect }: { features: Feature[]; selected: number | null; onSelect: (index: number) => void }) {
+function FeatureTable({ features, selected, onSelect, onReveal, onNew, onEdit }: { features: Feature[]; selected: number | null; onSelect: (index: number) => void; onReveal: (index: number) => void; onNew: () => void; onEdit: (index: number) => void }) {
+  const rowRefs = useRef<Array<HTMLTableRowElement | null>>([]);
+  const moveFocus = (index: number) => {
+    onSelect(index);
+    window.requestAnimationFrame(() => rowRefs.current[index]?.focus());
+  };
   return (
     <div className="table-view">
-      <div className="table-toolbar"><strong>{features.length} Features</strong><button disabled title="Feature creation is planned but not implemented yet.">＋ New Feature</button></div>
+      <div className="table-toolbar"><strong>{features.length} Features</strong><span /><button disabled={selected === null} onClick={() => selected !== null && onReveal(selected)}>Show in Sequence</button><button disabled={selected === null} onClick={() => selected !== null && onEdit(selected)}>Edit Selected…</button><button onClick={onNew}>＋ New Feature</button></div>
       <table>
         <thead><tr><th /><th>Name</th><th>Type</th><th>Range</th><th>Strand</th><th>Length</th></tr></thead>
         <tbody>
@@ -125,12 +145,19 @@ function FeatureTable({ features, selected, onSelect }: { features: Feature[]; s
             const first = feature.segments[0]?.span;
             const length = feature.segments.reduce((sum, segment) => sum + segment.span.end - segment.span.start, 0);
             return (
-              <tr className={selected === index ? "selected" : ""} key={`${feature.name}-${index}`} onClick={() => onSelect(index)} onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
+              <tr aria-selected={selected === index} className={selected === index ? "selected" : ""} key={feature.id ?? `${feature.name}-${index}`} onClick={() => onSelect(index)} onDoubleClick={() => onEdit(index)} ref={(element) => { rowRefs.current[index] = element; }} onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  onEdit(index);
+                } else if (event.key === " ") {
                   event.preventDefault();
                   onSelect(index);
+                } else if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+                  event.preventDefault();
+                  const target = event.key === "Home" ? 0 : event.key === "End" ? features.length - 1 : Math.max(0, Math.min(features.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+                  moveFocus(target);
                 }
-              }} tabIndex={0}>
+              }} tabIndex={index === (selected ?? 0) ? 0 : -1}>
                 <td><i className="feature-chip" style={{ background: feature.color ?? "#5cc8d7" }} /></td>
                 <td><strong>{feature.name}</strong></td><td>{feature.kind}</td>
                 <td className="mono">{first ? `${(first.start + 1).toLocaleString()} – ${first.end.toLocaleString()}` : "—"}</td>
@@ -144,10 +171,15 @@ function FeatureTable({ features, selected, onSelect }: { features: Feature[]; s
   );
 }
 
-function PrimerTable({ document, checks }: { document: OpenDocument; checks: PrimerCheck[] }) {
+function PrimerTable({ document, checks, selected, onSelect, onReveal, onNew, onEdit }: { document: OpenDocument; checks: PrimerCheck[]; selected: number | null; onSelect: (index: number) => void; onReveal: (index: number) => void; onNew: () => void; onEdit: (index: number) => void }) {
+  const rowRefs = useRef<Array<HTMLTableRowElement | null>>([]);
+  const moveFocus = (index: number) => {
+    onSelect(index);
+    window.requestAnimationFrame(() => rowRefs.current[index]?.focus());
+  };
   return (
     <div className="table-view">
-      <div className="table-toolbar"><strong>{document.document.primers.length} Primers</strong><button disabled title="Primer authoring is the next development slice.">＋ Add Primer</button></div>
+      <div className="table-toolbar"><strong>{document.document.primers.length} Primers</strong><span /><button disabled={selected === null} onClick={() => selected !== null && onReveal(selected)}>Show in Sequence</button><button disabled={selected === null} onClick={() => selected !== null && onEdit(selected)}>Edit Selected…</button><button onClick={onNew}>＋ Add Primer</button></div>
       <table>
         <thead><tr><th /><th>Name</th><th>Sequence (5′ → 3′)</th><th>Binding</th><th>Tail</th><th>Tm</th><th>Status</th></tr></thead>
         <tbody>
@@ -156,7 +188,15 @@ function PrimerTable({ document, checks }: { document: OpenDocument; checks: Pri
             const tailLength = Math.max(0, primer.sequence.length - bindingLength);
             const check = checks[index];
             return (
-              <tr key={`${primer.name}-${index}`}>
+              <tr aria-selected={selected === index} className={selected === index ? "selected" : ""} key={primer.id ?? `${primer.name}-${index}`} onClick={() => onSelect(index)} onDoubleClick={() => onEdit(index)} ref={(element) => { rowRefs.current[index] = element; }} onKeyDown={(event) => {
+                if (event.key === "Enter") { event.preventDefault(); onEdit(index); }
+                else if (event.key === " ") { event.preventDefault(); onSelect(index); }
+                else if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+                  event.preventDefault();
+                  const target = event.key === "Home" ? 0 : event.key === "End" ? document.document.primers.length - 1 : Math.max(0, Math.min(document.document.primers.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+                  moveFocus(target);
+                }
+              }} tabIndex={index === (selected ?? 0) ? 0 : -1}>
                 <td><i className="feature-chip" style={{ background: primer.color ?? "#79d6e5" }} /></td>
                 <td><strong>{primer.name}</strong></td><td className="mono sequence-cell">{primer.sequence}</td>
                 <td className="mono">{primer.binding_length ? `${bindingLength} nt` : "Not set"}</td><td className="mono">{primer.binding_length ? `${tailLength} nt` : "—"}</td>
@@ -306,9 +346,11 @@ function OrfPanel({ documentId, state, selectedId, showTranslation, onMinimumCha
   </div>;
 }
 
-function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setShowEnzymes, primerChecks, restrictionSites, restrictionSitesTruncated, selectedRestrictionId, diagnostics, onSelectRestrictionSite, findProps, orfProps }: {
+function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setShowEnzymes, showFeatureLabels, setShowFeatureLabels, showPrimers, setShowPrimers, primerChecks, restrictionSites, restrictionSitesTruncated, selectedRestrictionId, diagnostics, onSelectRestrictionSite, findProps, orfProps }: {
   view: BottomView; active: OpenDocument | null; setView: (view: BottomView) => void; zoom: number; setZoom: (value: number) => void;
   showEnzymes: boolean; setShowEnzymes: (value: boolean) => void;
+  showFeatureLabels: boolean; setShowFeatureLabels: (value: boolean) => void;
+  showPrimers: boolean; setShowPrimers: (value: boolean) => void;
   primerChecks: PrimerCheck[]; restrictionSites: RestrictionSite[]; diagnostics: Diagnostic[];
   restrictionSitesTruncated: boolean;
   selectedRestrictionId: string | null;
@@ -339,8 +381,8 @@ function BottomPanel({ view, active, setView, zoom, setZoom, showEnzymes, setSho
         {view === "Map Controls" && <div className="map-control-row">
           <label><span>Map zoom</span><input type="range" min="0.72" max="1.18" step="0.02" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
           <label className="switch-label"><input checked={showEnzymes} onChange={(event) => setShowEnzymes(event.target.checked)} type="checkbox" /><i /><span>Restriction sites</span></label>
-          <label className="switch-label unavailable" title="Feature-label display controls are planned but not implemented yet."><input defaultChecked disabled type="checkbox" /><i /><span>Feature labels</span></label>
-          <label className="switch-label unavailable" title="Primer-site display controls are planned but not implemented yet."><input defaultChecked disabled type="checkbox" /><i /><span>Primer sites</span></label>
+          <label className="switch-label"><input checked={showFeatureLabels} onChange={(event) => setShowFeatureLabels(event.target.checked)} type="checkbox" /><i /><span>Feature labels</span></label>
+          <label className="switch-label"><input checked={showPrimers} onChange={(event) => setShowPrimers(event.target.checked)} type="checkbox" /><i /><span>Primer sites</span></label>
         </div>}
         {view === "Find" && <FindPanel {...findProps} />}
         {view === "Enzymes" && (restrictionSites.length ? <div className="enzyme-browser"><header><strong>{restrictionSites.length.toLocaleString()}{restrictionSitesTruncated ? "+" : ""} common-enzyme sites</strong>{restrictionSitesTruncated && <span>Repetitive hits are capped at 1,000 per enzyme. Use Find with the recognition sequence to inspect additional matches.</span>}<button disabled={enzymePage === 0} onClick={() => setEnzymePage((page) => Math.max(0, page - 1))}>Previous</button><em>Page {enzymePage + 1} of {enzymePageCount}</em><button disabled={enzymePage + 1 >= enzymePageCount} onClick={() => setEnzymePage((page) => Math.min(enzymePageCount - 1, page + 1))}>Next</button></header><div className="enzyme-grid">{visibleRestrictionSites.map((site) => {
@@ -413,6 +455,34 @@ function NewDocumentSheet({ suggestedName, onClose, onCreate }: {
   );
 }
 
+function SplitWorkspace({ ratio, onRatioChange, focusedPane, onFocusPane, map, sequence }: {
+  ratio: number;
+  onRatioChange: (ratio: number) => void;
+  focusedPane: "map" | "sequence";
+  onFocusPane: (pane: "map" | "sequence") => void;
+  map: ReactNode;
+  sequence: ReactNode;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [resizing, setResizing] = useState(false);
+  const clamp = (value: number) => Math.max(24, Math.min(72, value));
+  const updateFromPointer = (clientY: number) => {
+    const bounds = containerRef.current?.getBoundingClientRect();
+    if (!bounds || bounds.height <= 0) return;
+    onRatioChange(clamp((clientY - bounds.top) / bounds.height * 100));
+  };
+  return <div className={`split-workspace${resizing ? " resizing" : ""}`} ref={containerRef} style={{ gridTemplateRows: `minmax(110px, ${ratio}fr) 7px minmax(120px, ${100 - ratio}fr)` }} onPointerMove={(event) => { if (resizing) updateFromPointer(event.clientY); }} onPointerUp={(event) => { if (resizing) { updateFromPointer(event.clientY); setResizing(false); event.currentTarget.releasePointerCapture(event.pointerId); } }}>
+    <section className={`split-pane map-pane${focusedPane === "map" ? " focused" : ""}`} onFocusCapture={() => onFocusPane("map")} onMouseDown={() => onFocusPane("map")}><header><strong>MAP</strong><span>Shared selection</span></header>{map}</section>
+    <div className="split-divider" role="separator" aria-label="Resize Map and Sequence panes" aria-orientation="horizontal" aria-valuemin={24} aria-valuemax={72} aria-valuenow={Math.round(ratio)} tabIndex={0} onDoubleClick={() => onRatioChange(44)} onPointerDown={(event) => { setResizing(true); event.currentTarget.parentElement?.setPointerCapture(event.pointerId); updateFromPointer(event.clientY); }} onKeyDown={(event) => {
+      if (!["ArrowUp", "ArrowDown", "Home"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "Home") onRatioChange(44);
+      else onRatioChange(clamp(ratio + (event.key === "ArrowDown" ? 1 : -1) * (event.shiftKey ? 10 : 2)));
+    }}><i /></div>
+    <section className={`split-pane sequence-pane${focusedPane === "sequence" ? " focused" : ""}`} onFocusCapture={() => onFocusPane("sequence")} onMouseDown={() => onFocusPane("sequence")}><header><strong>SEQUENCE</strong><span>Synchronized coordinates</span></header>{sequence}</section>
+  </div>;
+}
+
 function UnsavedChangesSheet({ documentNames, quitting, busy, onCancel, onDiscard, onSave }: {
   documentNames: string[];
   quitting: boolean;
@@ -439,8 +509,8 @@ function commandError(error: unknown): CommandError {
   return { code: "simulation-failed", message: "The simulation could not be completed.", action: String(error) };
 }
 
-function WorkflowSheet({ workflow, active, onClose, onCreate }: {
-  workflow: Exclude<Workflow, null>; active: OpenDocument; onClose: () => void; onCreate: (result: PcrCommandResult) => void;
+function WorkflowSheet({ workflow, active, onClose, onCreate, onBusyChange }: {
+  workflow: Exclude<Workflow, null>; active: OpenDocument; onClose: () => void; onCreate: (result: PcrCommandResult) => void; onBusyChange: (busy: boolean) => void;
 }) {
   const primers = active.document.primers;
   const [forwardIndex, setForwardIndex] = useState(0);
@@ -452,17 +522,28 @@ function WorkflowSheet({ workflow, active, onClose, onCreate }: {
   const [busy, setBusy] = useState(false);
   const dialogRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const closeCallbackRef = useRef(onClose);
+  const busyRef = useRef(busy);
+  const simulationTokenRef = useRef(0);
+  const simulationInFlightRef = useRef(false);
+  const queuedSimulationRef = useRef<(() => void) | null>(null);
+  const busyChangeRef = useRef(onBusyChange);
+  closeCallbackRef.current = onClose;
+  busyRef.current = busy;
+  busyChangeRef.current = onBusyChange;
   const explanatory = workflow === "PCR"
     ? "Amplify a region while preserving feature coordinates on a deterministic product."
     : workflow === "Inverse PCR"
       ? "Amplify away from the selected locus to mutate, delete, or linearize a circular template."
       : "Join two PCR fragments using validated primer-encoded overlaps.";
 
+  useEffect(() => busyChangeRef.current(busy), [busy]);
+
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     closeRef.current?.focus();
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !busyRef.current) closeCallbackRef.current();
       if (event.key !== "Tab" || !dialogRef.current) return;
       const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>("button:not([disabled]), select:not([disabled]), input:not([disabled])")];
       if (!focusable.length) return;
@@ -476,52 +557,79 @@ function WorkflowSheet({ workflow, active, onClose, onCreate }: {
       window.removeEventListener("keydown", handleKey);
       previousFocus?.focus();
     };
-  }, [onClose]);
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    const token = ++simulationTokenRef.current;
     const forward = primers[forwardIndex];
     const reverse = primers[reverseIndex];
     const internalReverse = primers[internalReverseIndex];
     const internalForward = primers[internalForwardIndex];
-    if (!forward || !reverse) {
-      setResult(null);
-      setError({ code: "primers-required", message: "This document does not contain a selectable primer pair.", action: "Add at least a forward and reverse primer, including explicit 3′ binding lengths." });
-      return;
-    }
     setBusy(true);
     setResult(null);
     setError(null);
     const mode = workflow === "PCR" ? "standard" : workflow === "Inverse PCR" ? "inverse" : "overlap-extension";
-    void invoke<PcrCommandResult>("simulate_pcr_product", {
-      request: {
-        mode,
-        templateName: active.document.name,
-        templateSequence: active.document.sequence,
-        circular: active.document.topology === "circular",
-        forwardPrimer: forward.sequence,
-        reversePrimer: reverse.sequence,
-        internalReversePrimer: mode === "overlap-extension" ? internalReverse?.sequence ?? null : null,
-        internalForwardPrimer: mode === "overlap-extension" ? internalForward?.sequence ?? null : null,
-        options: {
-          forwardBindingLength: forward.binding_length,
-          reverseBindingLength: reverse.binding_length,
-          internalReverseBindingLength: internalReverse?.binding_length ?? null,
-          internalForwardBindingLength: internalForward?.binding_length ?? null,
-          minimumThreePrimeMatch: 8,
-          maximumMismatches: null,
-          minimumOverlap: 15,
+    const selectedPrimers = mode === "overlap-extension" ? [forward, reverse, internalReverse, internalForward] : [forward, reverse];
+    const validationError = !forward || !reverse
+      ? { code: "primers-required", message: "This document does not contain a selectable primer pair.", action: "Add at least a forward and reverse primer, including explicit 3′ binding lengths." }
+      : selectedPrimers.some((primer) => !primer?.binding_length)
+        ? { code: "binding-length-required", message: "Every selected primer needs an explicit 3′ binding length.", action: "Edit each selected primer, set its 3′ template-binding length, and choose a validated site before PCR." }
+        : null;
+    const executeSimulation = () => {
+      if (simulationInFlightRef.current) {
+        queuedSimulationRef.current = executeSimulation;
+        return;
+      }
+      if (validationError || !forward || !reverse) {
+        if (simulationTokenRef.current === token) {
+          setError(validationError);
+          setBusy(false);
+        }
+        return;
+      }
+      simulationInFlightRef.current = true;
+      void invoke<PcrCommandResult>("simulate_pcr_product", {
+        request: {
+          mode,
+          templateName: active.document.name,
+          templateSequence: active.document.sequence,
+          circular: active.document.topology === "circular",
+          forwardPrimer: forward.sequence,
+          reversePrimer: reverse.sequence,
+          internalReversePrimer: mode === "overlap-extension" ? internalReverse?.sequence ?? null : null,
+          internalForwardPrimer: mode === "overlap-extension" ? internalForward?.sequence ?? null : null,
+          options: {
+            forwardBindingLength: forward.binding_length,
+            reverseBindingLength: reverse.binding_length,
+            internalReverseBindingLength: internalReverse?.binding_length ?? null,
+            internalForwardBindingLength: internalForward?.binding_length ?? null,
+            forwardBindingSites: forward.binding_sites,
+            reverseBindingSites: reverse.binding_sites,
+            internalReverseBindingSites: internalReverse?.binding_sites ?? [],
+            internalForwardBindingSites: internalForward?.binding_sites ?? [],
+            minimumThreePrimeMatch: 8,
+            maximumMismatches: null,
+            minimumOverlap: 15,
+          },
         },
-      },
-    }).then((next) => {
-      if (!cancelled) setResult(next);
-    }).catch((reason: unknown) => {
-      if (!cancelled) setError(commandError(reason));
-    }).finally(() => {
-      if (!cancelled) setBusy(false);
-    });
-    return () => { cancelled = true; };
-  }, [active, forwardIndex, internalForwardIndex, internalReverseIndex, primers, reverseIndex, workflow]);
+      }).then((next) => {
+        if (simulationTokenRef.current === token) setResult(next);
+      }).catch((reason: unknown) => {
+        if (simulationTokenRef.current === token) setError(commandError(reason));
+      }).finally(() => {
+        simulationInFlightRef.current = false;
+        const queued = queuedSimulationRef.current;
+        queuedSimulationRef.current = null;
+        if (queued) queued();
+        else if (simulationTokenRef.current === token) setBusy(false);
+      });
+    };
+    executeSimulation();
+    return () => {
+      if (queuedSimulationRef.current === executeSimulation) queuedSimulationRef.current = null;
+      if (simulationTokenRef.current === token) simulationTokenRef.current = token + 1;
+    };
+  }, [active.id, active.revision, forwardIndex, internalForwardIndex, internalReverseIndex, reverseIndex, workflow]);
 
   const primerSelect = (label: string, value: number, onChange: (value: number) => void) => (
     <label><span>{label}</span><select value={value} onChange={(event) => onChange(Number(event.target.value))}>
@@ -532,9 +640,9 @@ function WorkflowSheet({ workflow, active, onClose, onCreate }: {
   const forwardTm = result?.product.forwardBinding.meltingTemperature;
   const reverseTm = result?.product.reverseBinding.meltingTemperature;
   return (
-    <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
       <section className="workflow-sheet" ref={dialogRef} role="dialog" aria-modal="true" aria-label={workflow}>
-        <header><div><small>ACTION WORKFLOW</small><h2>{workflow}</h2><p>{explanatory}</p></div><button ref={closeRef} onClick={onClose} aria-label={`Close ${workflow}`}><Icon name="close" /></button></header>
+        <header><div><small>ACTION WORKFLOW</small><h2>{workflow}</h2><p>{explanatory}</p></div><button disabled={busy} ref={closeRef} onClick={onClose} aria-label={`Close ${workflow}`}><Icon name="close" /></button></header>
         <div className="workflow-steps"><span className="active"><b>1</b> Primers</span><span className={result ? "active" : ""}><b>2</b> Product</span><span className={result ? "active" : ""}><b>3</b> Verify</span></div>
         <div className="workflow-body">
           {primerSelect("Forward primer", forwardIndex, setForwardIndex)}
@@ -555,7 +663,7 @@ function WorkflowSheet({ workflow, active, onClose, onCreate }: {
             {result.product.warnings.length ? <div className="product-warnings"><strong>Review before ordering or cycling</strong>{result.product.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : <div className="workflow-success">Unique primer pair found with no advisory warnings.</div>}
           </>}
         </div>
-        <footer><span>{result ? `${result.product.features.length} deterministic product annotations` : "No product created yet"}</span><button onClick={onClose}>Cancel</button><button className="primary-button" disabled={!result || busy} onClick={() => result && onCreate(result)}>Create PCR Product</button></footer>
+        <footer><span>{result ? `${result.product.features.length} deterministic product annotations` : "No product created yet"}</span><button disabled={busy} onClick={onClose}>Cancel</button><button className="primary-button" disabled={!result || busy} onClick={() => result && onCreate(result)}>Create PCR Product</button></footer>
       </section>
     </div>
   );
@@ -571,6 +679,7 @@ export default function App() {
   const [bottomOpen, setBottomOpen] = useState(true);
   const [bottomView, setBottomView] = useState<BottomView>("Map Controls");
   const [selectedFeatures, setSelectedFeatures] = useState<Record<string, number | null>>({ [documents[0].id]: 4 });
+  const [selectedPrimers, setSelectedPrimers] = useState<Record<string, number | null>>({});
   const [sequenceSelections, setSequenceSelections] = useState<Record<string, SequenceSelection | null>>({});
   const [findQueries, setFindQueries] = useState<Record<string, string>>({});
   const [findIndices, setFindIndices] = useState<Record<string, number>>({});
@@ -582,9 +691,16 @@ export default function App() {
   const [projectSearch, setProjectSearch] = useState("");
   const [status, setStatus] = useState("Ready");
   const [monochrome, setMonochrome] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  const [documentZooms, setDocumentZooms] = useState<Record<string, number>>({});
+  const [splitDocumentIds, setSplitDocumentIds] = useState<Set<string>>(() => new Set());
+  const [splitRatios, setSplitRatios] = useState<Record<string, number>>({});
+  const sequenceScrollTopsRef = useRef<Record<string, number>>({});
   const [showEnzymes, setShowEnzymes] = useState(true);
+  const [showFeatureLabels, setShowFeatureLabels] = useState(true);
+  const [showPrimers, setShowPrimers] = useState(true);
   const [workflow, setWorkflow] = useState<Workflow>(null);
+  const [workflowBusy, setWorkflowBusy] = useState(false);
+  const [annotationEditor, setAnnotationEditor] = useState<AnnotationEditorState | null>(null);
   const [newDocumentOpen, setNewDocumentOpen] = useState(false);
   const [closeRequest, setCloseRequest] = useState<CloseRequest | null>(null);
   const [closeRequestBusy, setCloseRequestBusy] = useState(false);
@@ -606,20 +722,32 @@ export default function App() {
   const reservedSavePathsRef = useRef<Map<string, string>>(new Map());
   const newDocumentOpenRef = useRef(newDocumentOpen);
   const workflowRef = useRef(workflow);
+  const workflowBusyRef = useRef(workflowBusy);
+  const annotationEditorRef = useRef(annotationEditor);
   const revealTokenRef = useRef(0);
   const orfRequestTokensRef = useRef<Record<string, number>>({});
   const orfTranslationTokensRef = useRef<Record<string, number>>({});
   const findRequestTokensRef = useRef<Record<string, number>>({});
   const findInFlightRef = useRef<Set<string>>(new Set());
   const findQueuedRunsRef = useRef<Record<string, (() => void) | undefined>>({});
+  const primerCheckTokenRef = useRef(0);
+  const primerCheckInFlightRef = useRef(false);
+  const primerCheckQueuedRunRef = useRef<(() => void) | null>(null);
   newDocumentOpenRef.current = newDocumentOpen;
   workflowRef.current = workflow;
+  workflowBusyRef.current = workflowBusy;
+  annotationEditorRef.current = annotationEditor;
 
   const active = documents.find((document) => document.id === activeId) ?? null;
+  const annotationDocument = annotationEditor ? documents.find((document) => document.id === annotationEditor.documentId) ?? null : null;
   const selectedFeature = active ? selectedFeatures[active.id] ?? null : null;
+  const selectedPrimer = active ? selectedPrimers[active.id] ?? null : null;
   const storedSelection = active ? sequenceSelections[active.id] ?? null : null;
   const activeSelection = active && storedSelection?.revision === active.revision ? storedSelection : null;
   const activeBusy = active ? pendingEditIds.has(active.id) || pendingSaveIds.has(active.id) : false;
+  const splitActive = active ? splitDocumentIds.has(active.id) : false;
+  const splitRatio = active ? splitRatios[active.id] ?? 44 : 44;
+  const zoom = active ? documentZooms[active.id] ?? 1 : 1;
   const activeCanSave = canSaveDocument(active, activeBusy);
   const canUndo = active ? !activeBusy && (editHistories[active.id]?.undo.length ?? 0) > 0 : false;
   const canRedo = active ? !activeBusy && (editHistories[active.id]?.redo.length ?? 0) > 0 : false;
@@ -630,7 +758,7 @@ export default function App() {
     canUndo,
     canRedo,
     hasDraft: draftDocumentIds.size > 0,
-    modalOpen: newDocumentOpen || workflow !== null || closeRequest !== null,
+    modalOpen: newDocumentOpen || workflow !== null || annotationEditor !== null || closeRequest !== null,
     closeBusy: closeRequestBusy,
     activeView: active?.view ?? null,
   });
@@ -651,6 +779,11 @@ export default function App() {
   const storedTranslation = active ? orfTranslations[active.id] ?? null : null;
   const activeTranslation = active && showTranslations[active.id] && selectedOrf && storedTranslation?.orfId === selectedOrf.id ? storedTranslation : null;
 
+  function setZoom(value: number) {
+    if (!active) return;
+    setDocumentZooms((current) => ({ ...current, [active.id]: value }));
+  }
+
   function revealSelection(document: OpenDocument, selection: Omit<SequenceSelection, "documentId" | "revision" | "revealToken">) {
     if (selection.source !== "find") {
       findRequestTokensRef.current[document.id] = (findRequestTokensRef.current[document.id] ?? 0) + 1;
@@ -666,33 +799,87 @@ export default function App() {
       revealToken: ++revealTokenRef.current,
     };
     setSequenceSelections((current) => ({ ...current, [document.id]: nextSelection }));
-    updateDocuments((current) => current.map((item) => item.id === document.id ? { ...item, view: "sequence" } : item));
+    if (!splitDocumentIds.has(document.id)) {
+      updateDocuments((current) => current.map((item) => item.id === document.id ? { ...item, view: "sequence" } : item));
+    }
     setActiveId(document.id);
     return nextSelection;
   }
 
-  function selectFeature(index: number) {
-    if (!active) return;
-    const feature = active.document.features[index];
+  function revealFeature(document: OpenDocument, index: number) {
+    const feature = document.document.features[index];
     if (!feature) return;
-    const intervals = normalizeIntervals(feature.segments.map((segment) => segment.span), active.length);
-    setSelectedFeatures((current) => ({ ...current, [active.id]: index }));
-    const selection = revealSelection(active, {
+    const intervals = normalizeIntervals(feature.segments.map((segment) => segment.span), document.length);
+    setSelectedFeatures((current) => ({ ...current, [document.id]: index }));
+    setSelectedPrimers((current) => ({ ...current, [document.id]: null }));
+    const selection = revealSelection(document, {
       source: "feature",
-      entityId: `feature:${index}:${feature.name}`,
+      entityId: `feature:${feature.id ?? `${index}:${feature.name}`}`,
       label: feature.name,
       intervals,
       strand: feature.strand,
-      wrapsOrigin: active.document.topology === "circular" && intervals.some(({ start }) => start === 0) && intervals.some(({ end }) => end === active.length),
+      wrapsOrigin: document.document.topology === "circular" && intervals.some(({ start }) => start === 0) && intervals.some(({ end }) => end === document.length),
       color: feature.color,
       detail: `${feature.kind} · ${intervals.reduce((sum, interval) => sum + interval.end - interval.start, 0).toLocaleString()} bp`,
     });
     setStatus(`Selected ${feature.name} · ${displayIntervals(selection.intervals)} · ${feature.strand}`);
   }
 
+  function selectFeature(index: number) {
+    if (active) revealFeature(active, index);
+  }
+
+  function selectFeatureRow(index: number) {
+    if (!active || !active.document.features[index]) return;
+    setSelectedFeatures((current) => ({ ...current, [active.id]: index }));
+    setSelectedPrimers((current) => ({ ...current, [active.id]: null }));
+    setSequenceSelections((current) => ({ ...current, [active.id]: null }));
+    setOrfTranslations((current) => ({ ...current, [active.id]: null }));
+    setStatus(`Selected ${active.document.features[index].name} · double-click or choose Edit Selected to edit`);
+  }
+
+  function revealPrimer(document: OpenDocument, index: number) {
+    const primer = document.document.primers[index];
+    if (!primer) return;
+    setSelectedPrimers((current) => ({ ...current, [document.id]: index }));
+    setSelectedFeatures((current) => ({ ...current, [document.id]: null }));
+    const intervals = normalizeIntervals(primer.binding_sites.map((site) => site.span), document.length);
+    if (!intervals.length) {
+      setStatus(`${primer.name} has no stored binding site · choose Edit Selected to validate and attach one`);
+      return;
+    }
+    const strands = new Set(primer.binding_sites.map((site) => site.strand));
+    const strand = strands.size === 1 ? primer.binding_sites[0].strand : "both";
+    const selection = revealSelection(document, {
+      source: "primer",
+      entityId: `primer:${primer.id ?? `${index}:${primer.name}`}`,
+      label: primer.name,
+      intervals,
+      strand,
+      wrapsOrigin: document.document.topology === "circular" && intervals.some(({ start }) => start === 0) && intervals.some(({ end }) => end === document.length),
+      color: primer.color,
+      detail: `${primer.binding_length ?? primer.sequence.length} nt 3′ binding · ${Math.max(0, primer.sequence.length - (primer.binding_length ?? primer.sequence.length))} nt 5′ tail`,
+    });
+    setStatus(`Selected primer ${primer.name} · ${displayIntervals(selection.intervals)}`);
+  }
+
+  function selectPrimer(index: number) {
+    if (active) revealPrimer(active, index);
+  }
+
+  function selectPrimerRow(index: number) {
+    if (!active || !active.document.primers[index]) return;
+    setSelectedPrimers((current) => ({ ...current, [active.id]: index }));
+    setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setSequenceSelections((current) => ({ ...current, [active.id]: null }));
+    setOrfTranslations((current) => ({ ...current, [active.id]: null }));
+    setStatus(`Selected ${active.document.primers[index].name} · double-click or choose Edit Selected to edit`);
+  }
+
   function selectRestrictionSite(site: RestrictionSite) {
     if (!active) return;
     setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setSelectedPrimers((current) => ({ ...current, [active.id]: null }));
     const selection = revealSelection(active, {
       source: "restriction",
       entityId: `restriction:${site.enzyme}:${site.position}:${site.orientation}`,
@@ -712,6 +899,7 @@ export default function App() {
     const match = matches[normalizedIndex];
     setFindIndices((current) => ({ ...current, [active.id]: normalizedIndex }));
     setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setSelectedPrimers((current) => ({ ...current, [active.id]: null }));
     revealSelection(active, {
       source: "find",
       entityId: `find:${query.toUpperCase()}:${match.start}`,
@@ -729,6 +917,7 @@ export default function App() {
     setFindQueries((current) => ({ ...current, [active.id]: query }));
     setFindIndices((current) => ({ ...current, [active.id]: 0 }));
     setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setSelectedPrimers((current) => ({ ...current, [active.id]: null }));
     setSequenceSelections((current) => ({ ...current, [active.id]: null }));
     orfTranslationTokensRef.current[active.id] = (orfTranslationTokensRef.current[active.id] ?? 0) + 1;
     setOrfTranslations((current) => ({ ...current, [active.id]: null }));
@@ -808,6 +997,7 @@ export default function App() {
   function selectOrf(orf: OpenReadingFrame) {
     if (!active) return;
     setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setSelectedPrimers((current) => ({ ...current, [active.id]: null }));
     setShowTranslations((current) => ({ ...current, [active.id]: true }));
     revealSelection(active, {
       source: "orf",
@@ -869,6 +1059,10 @@ export default function App() {
 
   function focusDocumentDraft(id: string) {
     setActiveId(id);
+    if (annotationEditorRef.current?.documentId === id) {
+      setStatus("Apply or cancel the annotation draft before continuing.");
+      return;
+    }
     updateDocuments((current) => current.map((document) => document.id === id ? { ...document, view: "sequence" } : document));
     setStatus("Apply or cancel the sequence draft before continuing.");
   }
@@ -932,6 +1126,7 @@ export default function App() {
         if (matches.length) {
           const match = matches[0];
           setSelectedFeatures((current) => ({ ...current, [document.id]: null }));
+          setSelectedPrimers((current) => ({ ...current, [document.id]: null }));
           setSequenceSelections((current) => ({ ...current, [document.id]: {
             documentId: document.id,
             revision: document.revision,
@@ -970,25 +1165,42 @@ export default function App() {
   }, [active?.document.sequence, active?.document.topology, active?.id, active?.revision, findQuery]);
 
   useEffect(() => {
-    let cancelled = false;
-    if (!active?.document.primers.length) {
+    const document = active;
+    const token = ++primerCheckTokenRef.current;
+    if (!document?.document.primers.length) {
       setPrimerChecks([]);
       return;
     }
     setPrimerChecks([]);
-    void invoke<PrimerCheck[]>("analyze_document_primers", {
-      request: {
-        templateSequence: active.document.sequence,
-        circular: active.document.topology === "circular",
-        primers: active.document.primers.map((primer) => ({ name: primer.name, sequence: primer.sequence, bindingLength: primer.binding_length })),
-      },
-    }).then((checks) => {
-      if (!cancelled) setPrimerChecks(checks);
-    }).catch((error: unknown) => {
-      if (!cancelled) setAppDiagnostics((current) => [...current, { level: "error", title: "Primer checks could not run", body: String(error) }]);
-    });
-    return () => { cancelled = true; };
-  }, [active]);
+    const executeAnalysis = () => {
+      if (primerCheckInFlightRef.current) {
+        primerCheckQueuedRunRef.current = executeAnalysis;
+        return;
+      }
+      primerCheckInFlightRef.current = true;
+      void invoke<PrimerCheck[]>("analyze_document_primers", {
+        request: {
+          templateSequence: document.document.sequence,
+          circular: document.document.topology === "circular",
+          primers: document.document.primers.map((primer) => ({ name: primer.name, sequence: primer.sequence, bindingLength: primer.binding_length })),
+        },
+      }).then((checks) => {
+        if (primerCheckTokenRef.current === token) setPrimerChecks(checks);
+      }).catch((error: unknown) => {
+        if (primerCheckTokenRef.current === token) setAppDiagnostics((current) => [...current, { level: "error", title: "Primer checks could not run", body: String(error) }]);
+      }).finally(() => {
+        primerCheckInFlightRef.current = false;
+        const queued = primerCheckQueuedRunRef.current;
+        primerCheckQueuedRunRef.current = null;
+        queued?.();
+      });
+    };
+    executeAnalysis();
+    return () => {
+      if (primerCheckQueuedRunRef.current === executeAnalysis) primerCheckQueuedRunRef.current = null;
+      if (primerCheckTokenRef.current === token) primerCheckTokenRef.current = token + 1;
+    };
+  }, [active?.id, active?.revision]);
 
   function setActiveView(view: DocumentView) {
     if (!active) return;
@@ -996,7 +1208,147 @@ export default function App() {
       focusDocumentDraft(active.id);
       return;
     }
+    if (active.view === view) return;
+    if (view !== "map" && view !== "sequence") {
+      setSplitDocumentIds((current) => {
+        const next = new Set(current);
+        next.delete(active.id);
+        return next;
+      });
+    }
     updateDocuments((current) => current.map((document) => document.id === active.id ? { ...document, view } : document));
+  }
+
+  function toggleSplit() {
+    if (!active) return;
+    if (draftDocumentIdsRef.current.has(active.id)) {
+      focusDocumentDraft(active.id);
+      return;
+    }
+    setSplitDocumentIds((current) => {
+      const next = new Set(current);
+      if (next.has(active.id)) next.delete(active.id);
+      else next.add(active.id);
+      return next;
+    });
+    if (active.view !== "map" && active.view !== "sequence") {
+      updateDocuments((current) => current.map((document) => document.id === active.id ? { ...document, view: "sequence" } : document));
+    }
+    setStatus(splitActive ? "Closed Map/Sequence Split" : "Opened synchronized Map/Sequence Split");
+  }
+
+  function openFeatureEditor(index: number | null = null) {
+    if (!active || activeBusy) return;
+    if (draftDocumentIdsRef.current.has(active.id)) {
+      focusDocumentDraft(active.id);
+      return;
+    }
+    if (index !== null && !active.document.features[index]) return;
+    setAnnotationEditor({ kind: "feature", documentId: active.id, revision: active.revision, index });
+  }
+
+  function openPrimerEditor(index: number | null = null) {
+    if (!active || activeBusy) return;
+    if (draftDocumentIdsRef.current.has(active.id)) {
+      focusDocumentDraft(active.id);
+      return;
+    }
+    if (index !== null && !active.document.primers[index]) return;
+    setAnnotationEditor({ kind: "primer", documentId: active.id, revision: active.revision, index });
+  }
+
+  function closeAnnotationEditor() {
+    if (annotationEditor) setDocumentDraftState(annotationEditor.documentId, false);
+    setAnnotationEditor(null);
+  }
+
+  function requestCloseAnnotationEditor() {
+    if (!annotationEditor) return;
+    if (pendingEditIdsRef.current.has(annotationEditor.documentId)) {
+      setStatus("Wait for the annotation change to finish before closing the sheet");
+      return;
+    }
+    if (draftDocumentIdsRef.current.has(annotationEditor.documentId) && !window.confirm("Discard the unapplied annotation changes?")) return;
+    closeAnnotationEditor();
+  }
+
+  async function commitDocumentMutation(documentId: string, revision: number, mutation: DocumentMutation, statusLabel: string) {
+    if (pendingEditIdsRef.current.has(documentId) || pendingSaveIdsRef.current.has(documentId)) throw new Error("Wait for the current edit or save to finish.");
+    const editingDocument = documentsRef.current.find((document) => document.id === documentId);
+    if (!editingDocument || editingDocument.revision !== revision) throw new Error("The document changed while the editor was open. Reopen the sheet and try again.");
+    setPending(setPendingEditIds, pendingEditIdsRef, documentId, true);
+    setStatus(`${statusLabel}…`);
+    try {
+      const result = await invoke<DocumentMutationResult>("apply_document_mutation", { request: { document: editingDocument.document, mutation } });
+      const live = documentsRef.current.find((document) => document.id === documentId);
+      if (!live || live.revision !== revision) throw new Error("The document changed while this annotation edit was running; the stale result was discarded.");
+      if (!result.changed) {
+        closeAnnotationEditor();
+        setStatus("No annotation changes to apply");
+        return { result, document: live };
+      }
+      const history = editHistoriesRef.current[documentId] ?? { undo: [], redo: [] };
+      const nextHistories = { ...editHistoriesRef.current, [documentId]: { undo: appendHistorySnapshot(history.undo, editingDocument), redo: [] } };
+      editHistoriesRef.current = nextHistories;
+      setEditHistories(nextHistories);
+      invalidateDerivedState(documentId);
+      const nextDocument: OpenDocument = {
+        ...editingDocument,
+        document: result.summary.document,
+        length: result.summary.length,
+        gcPercent: result.summary.gcPercent,
+        unknownBases: result.summary.unknownBases,
+        diagnostics: result.summary.diagnostics,
+        dirty: !matchesSavepoint(documentId, result.summary.document),
+        revision: editingDocument.revision + 1,
+      };
+      updateDocuments((current) => current.map((document) => document.id === documentId && document.revision === revision ? nextDocument : document));
+      closeAnnotationEditor();
+      setStatus(statusLabel.replace(/ing\b/, "ed"));
+      return { result, document: nextDocument };
+    } finally {
+      setPending(setPendingEditIds, pendingEditIdsRef, documentId, false);
+    }
+  }
+
+  async function saveFeatureAnnotation(feature: Feature) {
+    if (!annotationEditor || annotationEditor.kind !== "feature" || !annotationDocument) return;
+    const index = annotationEditor.index;
+    const mutation: DocumentMutation = index === null
+      ? { kind: "create-feature", feature }
+      : { kind: "replace-feature", index, expected: annotationDocument.document.features[index], replacement: feature };
+    const committed = await commitDocumentMutation(annotationEditor.documentId, annotationEditor.revision, mutation, index === null ? `Adding feature ${feature.name}` : `Updating feature ${feature.name}`);
+    if (committed?.result.entityIndex !== null) revealFeature(committed.document, committed.result.entityIndex);
+  }
+
+  async function deleteFeatureAnnotation() {
+    if (!annotationEditor || annotationEditor.kind !== "feature" || annotationEditor.index === null || !annotationDocument) return;
+    const index = annotationEditor.index;
+    const feature = annotationDocument.document.features[index];
+    await commitDocumentMutation(annotationEditor.documentId, annotationEditor.revision, { kind: "delete-feature", index, expected: feature }, `Removing feature ${feature.name}`);
+    setSelectedFeatures((current) => ({ ...current, [annotationEditor.documentId]: null }));
+  }
+
+  async function savePrimerAnnotation(primer: Primer) {
+    if (!annotationEditor || annotationEditor.kind !== "primer" || !annotationDocument) return;
+    const index = annotationEditor.index;
+    const mutation: DocumentMutation = index === null
+      ? { kind: "create-primer", primer }
+      : { kind: "replace-primer", index, expected: annotationDocument.document.primers[index], replacement: primer };
+    const committed = await commitDocumentMutation(annotationEditor.documentId, annotationEditor.revision, mutation, index === null ? `Adding primer ${primer.name}` : `Updating primer ${primer.name}`);
+    const entityIndex = committed?.result.entityIndex;
+    if (entityIndex === null || entityIndex === undefined) return;
+    setSelectedPrimers((current) => ({ ...current, [annotationEditor.documentId]: entityIndex }));
+    if (committed.document.document.primers[entityIndex]?.binding_sites.length) revealPrimer(committed.document, entityIndex);
+    else setStatus(`Saved ${primer.name} without a stored binding site`);
+  }
+
+  async function deletePrimerAnnotation() {
+    if (!annotationEditor || annotationEditor.kind !== "primer" || annotationEditor.index === null || !annotationDocument) return;
+    const index = annotationEditor.index;
+    const primer = annotationDocument.document.primers[index];
+    await commitDocumentMutation(annotationEditor.documentId, annotationEditor.revision, { kind: "delete-primer", index, expected: primer }, `Removing primer ${primer.name}`);
+    setSelectedPrimers((current) => ({ ...current, [annotationEditor.documentId]: null }));
   }
 
   async function openFile() {
@@ -1070,6 +1422,11 @@ export default function App() {
       delete updated[id];
       return updated;
     });
+    setSelectedPrimers((current) => { const updated = { ...current }; delete updated[id]; return updated; });
+    setSplitDocumentIds((current) => { const updated = new Set(current); updated.delete(id); return updated; });
+    setSplitRatios((current) => { const updated = { ...current }; delete updated[id]; return updated; });
+    delete sequenceScrollTopsRef.current[id];
+    setDocumentZooms((current) => { const updated = { ...current }; delete updated[id]; return updated; });
     setSequenceSelections((current) => {
       const updated = { ...current };
       delete updated[id];
@@ -1115,6 +1472,8 @@ export default function App() {
     editHistoriesRef.current = nextHistories;
     setEditHistories(nextHistories);
     invalidateDerivedState(active.id);
+    setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setSelectedPrimers((current) => ({ ...current, [active.id]: null }));
     updateDocuments((current) => current.map((document) => document.id === active.id ? {
       ...previous,
       path: active.path,
@@ -1124,7 +1483,7 @@ export default function App() {
       view: active.view,
       revision: active.revision + 1,
     } : document));
-    setStatus(`Undid sequence edit · ${previous.length.toLocaleString()} bp`);
+    setStatus(`Undid document edit · ${previous.length.toLocaleString()} bp`);
   }
 
   function redoActiveDocument() {
@@ -1142,6 +1501,8 @@ export default function App() {
     editHistoriesRef.current = nextHistories;
     setEditHistories(nextHistories);
     invalidateDerivedState(active.id);
+    setSelectedFeatures((current) => ({ ...current, [active.id]: null }));
+    setSelectedPrimers((current) => ({ ...current, [active.id]: null }));
     updateDocuments((current) => current.map((document) => document.id === active.id ? {
       ...next,
       path: active.path,
@@ -1151,7 +1512,7 @@ export default function App() {
       view: active.view,
       revision: active.revision + 1,
     } : document));
-    setStatus(`Redid sequence edit · ${next.length.toLocaleString()} bp`);
+    setStatus(`Redid document edit · ${next.length.toLocaleString()} bp`);
   }
 
   async function saveDocument(documentId: string, saveAs = false) {
@@ -1285,11 +1646,26 @@ export default function App() {
     }
   }
 
+  function updateWorkflowBusy(busy: boolean) {
+    workflowBusyRef.current = busy;
+    setWorkflowBusy(busy);
+  }
+
+  function requestCloseWorkflow() {
+    if (!workflow) return;
+    if (workflowBusyRef.current) {
+      setStatus("Wait for the PCR calculation to finish before closing the workflow");
+      return;
+    }
+    setWorkflow(null);
+  }
+
   function handleMenuAction(id: string) {
-    if (newDocumentOpen || workflow || closeRequest) {
+    if (newDocumentOpen || workflow || annotationEditor || closeRequest) {
       if (id === "file.close" && !closeRequestBusy) {
         if (newDocumentOpen) setStatus("Use Cancel or Create Document to finish the new-document sheet.");
-        else if (workflow) setWorkflow(null);
+        else if (workflow) requestCloseWorkflow();
+        else if (annotationEditor) requestCloseAnnotationEditor();
         else setCloseRequest(null);
       }
       return;
@@ -1318,6 +1694,7 @@ export default function App() {
       focusDocumentDraft(blockingDraft);
       return;
     }
+    updateWorkflowBusy(true);
     setWorkflow(next);
     setActionsOpen(false);
   }
@@ -1328,6 +1705,7 @@ export default function App() {
     updateDocuments((current) => [...current, opened]);
     setSelectedFeatures((current) => ({ ...current, [opened.id]: opened.document.features.length ? 0 : null }));
     setActiveId(opened.id);
+    updateWorkflowBusy(false);
     setWorkflow(null);
     setStatus(`Created ${opened.document.name} · ${result.product.length.toLocaleString()} bp`);
     setDocumentDiagnostics((current) => ({
@@ -1391,11 +1769,12 @@ export default function App() {
       const editingText = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable);
       if (!event.metaKey) return;
       const key = event.key.toLowerCase();
-      if (newDocumentOpen || workflow || closeRequest) {
+      if (newDocumentOpen || workflow || annotationEditor || closeRequest) {
         if (key === "w" && !closeRequestBusy) {
           event.preventDefault();
           if (newDocumentOpen) return;
-          if (workflow) setWorkflow(null);
+          if (workflow) requestCloseWorkflow();
+          else if (annotationEditor) requestCloseAnnotationEditor();
           else setCloseRequest(null);
         }
         return;
@@ -1467,9 +1846,9 @@ export default function App() {
         window.alert("Apply or cancel the sequence draft before quitting DOTDNA.");
         return;
       }
-      if (newDocumentOpenRef.current || workflowRef.current) {
+      if (newDocumentOpenRef.current || workflowRef.current || annotationEditorRef.current) {
         event.preventDefault();
-        window.alert(`Finish or cancel the ${newDocumentOpenRef.current ? "new document" : "PCR design"} sheet before quitting DOTDNA.`);
+        window.alert(`Finish or cancel the ${newDocumentOpenRef.current ? "new document" : workflowRef.current ? "PCR design" : "annotation editor"} sheet before quitting DOTDNA.`);
         return;
       }
       if (pendingEditIdsRef.current.size || pendingSaveIdsRef.current.size) {
@@ -1490,6 +1869,9 @@ export default function App() {
     };
   }, []);
 
+  const mapPane = active ? <Suspense fallback={<div className="map-loading">Starting accelerated map renderer…</div>}><PlasmidMap name={active.document.name} topology={active.document.topology} sequenceLength={active.length} features={active.document.features} primers={active.document.primers} restrictionSites={restrictionSites} restrictionSitesTruncated={restrictionScan.truncated} selection={activeSelection} selectedFeature={selectedFeature} selectedPrimer={selectedPrimer} onSelectFeature={selectFeature} onSelectPrimer={selectPrimer} onSelectRestrictionSite={selectRestrictionSite} zoom={zoom} showEnzymes={showEnzymes} showFeatureLabels={showFeatureLabels} showPrimers={showPrimers} /></Suspense> : null;
+  const sequencePane = active ? <SequenceView key={active.id} sequence={active.document.sequence} monochrome={monochrome} disabled={activeBusy} selection={activeSelection} secondaryIntervals={bottomView === "Find" ? secondaryFindIntervals : []} translation={activeTranslation} features={active.document.features} primers={active.document.primers} onSelectFeature={selectFeature} onSelectPrimer={selectPrimer} onOpenTranslations={openOrfs} initialScrollTop={sequenceScrollTopsRef.current[active.id] ?? 0} onScrollTopChange={(scrollTop) => { sequenceScrollTopsRef.current[active.id] = scrollTop; }} onApply={(sequence) => applySequenceEdit(active.id, sequence)} onDraftStateChange={(dirty) => setDocumentDraftState(active.id, dirty)} /> : null;
+
   return (
     <main className="app-shell">
       <header className="titlebar" data-tauri-drag-region>
@@ -1503,13 +1885,13 @@ export default function App() {
         <div className="tool-divider" />
         <div className="tool-group"><ToolButton icon="undo" label="Undo" disabled={!canUndo} onClick={undoActiveDocument} /><ToolButton icon="redo" label="Redo" disabled={!canRedo} onClick={redoActiveDocument} /></div>
         <div className="tool-divider" />
-        <div className="tool-group"><ToolButton icon="annotate" label="Feature" disabled disabledReason="Feature creation is planned but not implemented yet." /><ToolButton icon="primer" label="Primer" disabled disabledReason="Primer authoring is the next development slice." />
+        <div className="tool-group"><ToolButton icon="annotate" label="Feature" disabled={!active || activeBusy} onClick={() => openFeatureEditor()} /><ToolButton icon="primer" label="Primer" disabled={!active || activeBusy} onClick={() => openPrimerEditor()} />
           <div className="action-menu-wrap"><ToolButton icon="actions" label="Actions" active={actionsOpen} disabled={!active} onClick={() => setActionsOpen((value) => !value)} />
             {actionsOpen && <div className="action-menu"><small>MOLECULAR ACTIONS</small><button onClick={() => chooseWorkflow("PCR")}><b>PCR…</b><span>Amplify between primers</span></button><button onClick={() => chooseWorkflow("Inverse PCR")}><b>Inverse PCR…</b><span>Mutate or delete circular DNA</span></button><button onClick={() => chooseWorkflow("Overlap-Extension PCR")}><b>Overlap-Extension PCR…</b><span>Join overlapping products</span></button><hr /><button disabled title="Restriction digest is planned but not implemented yet."><b>Restriction Digest…</b><span>Planned</span></button><button disabled title="Assembly is planned but not implemented yet."><b>Assembly…</b><span>Planned</span></button></div>}
           </div>
         </div>
         <div className="toolbar-spacer" />
-        <div className="tool-group compact"><ToolButton icon="search" label="Find" disabled={!active} onClick={openFind} /><ToolButton icon="split" label="Split" disabled disabledReason="Split view is planned but not implemented yet." /><ToolButton icon="inspector" label="Inspector" active={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)} /></div>
+        <div className="tool-group compact"><ToolButton icon="search" label="Find" disabled={!active} onClick={openFind} /><ToolButton icon="split" label="Split" active={splitActive} disabled={!active} onClick={toggleSplit} /><ToolButton icon="inspector" label="Inspector" active={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)} /></div>
       </section>
 
       <section className={`workspace${sidebarOpen ? "" : " no-sidebar"}${inspectorOpen ? "" : " no-inspector"}${bottomOpen ? "" : " no-bottom"}`}>
@@ -1528,18 +1910,20 @@ export default function App() {
           })}</nav>
           {active ? <>
             <nav className="view-tabs">{views.map((view) => <button className={active.view === view.id ? "active" : ""} key={view.id} onClick={() => setActiveView(view.id)} title={view.shortcut}>{view.label}</button>)}<span /><label><input checked={monochrome} onChange={(event) => setMonochrome(event.target.checked)} type="checkbox" /> Monochrome bases</label></nav>
-            <div className="view-content">
-              {active.view === "map" && <Suspense fallback={<div className="map-loading">Starting accelerated map renderer…</div>}><PlasmidMap name={active.document.name} topology={active.document.topology} sequenceLength={active.length} features={active.document.features} restrictionSites={restrictionSites} restrictionSitesTruncated={restrictionScan.truncated} selection={activeSelection} selectedFeature={selectedFeature} onSelectFeature={selectFeature} onSelectRestrictionSite={selectRestrictionSite} zoom={zoom} showEnzymes={showEnzymes} /></Suspense>}
-              {active.view === "sequence" && <SequenceView key={active.id} sequence={active.document.sequence} monochrome={monochrome} disabled={activeBusy} selection={activeSelection} secondaryIntervals={bottomView === "Find" ? secondaryFindIntervals : []} translation={activeTranslation} onApply={(sequence) => applySequenceEdit(active.id, sequence)} onDraftStateChange={(dirty) => setDocumentDraftState(active.id, dirty)} />}
-              {active.view === "features" && <FeatureTable features={active.document.features} selected={selectedFeature} onSelect={selectFeature} />}
-              {active.view === "primers" && <PrimerTable document={active} checks={primerChecks} />}
+            <div className={`view-content${splitActive ? " split-active" : ""}`}>
+              {splitActive ? <SplitWorkspace ratio={splitRatio} onRatioChange={(ratio) => setSplitRatios((current) => ({ ...current, [active.id]: ratio }))} focusedPane={active.view === "map" ? "map" : "sequence"} onFocusPane={(pane) => setActiveView(pane)} map={mapPane} sequence={sequencePane} /> : <>
+              {active.view === "map" && mapPane}
+              {active.view === "sequence" && sequencePane}
+              {active.view === "features" && <FeatureTable features={active.document.features} selected={selectedFeature} onSelect={selectFeatureRow} onReveal={selectFeature} onNew={() => openFeatureEditor()} onEdit={(index) => openFeatureEditor(index)} />}
+              {active.view === "primers" && <PrimerTable document={active} checks={primerChecks} selected={selectedPrimer} onSelect={selectPrimerRow} onReveal={selectPrimer} onNew={() => openPrimerEditor()} onEdit={(index) => openPrimerEditor(index)} />}
               {active.view === "history" && <HistoryView document={active} />}
+              </>}
             </div>
           </> : <EmptyWorkspace onNew={beginNewDocument} onOpen={() => void openFile()} />}
         </section>
 
         {inspectorOpen && <Inspector active={active} selectedFeature={selectedFeature} selection={activeSelection} />}
-        {bottomOpen && <BottomPanel view={bottomView} active={active} setView={setBottomPanelView} zoom={zoom} setZoom={setZoom} showEnzymes={showEnzymes} setShowEnzymes={setShowEnzymes} primerChecks={primerChecks} restrictionSites={restrictionSites} restrictionSitesTruncated={restrictionScan.truncated} selectedRestrictionId={activeSelection?.source === "restriction" ? activeSelection.entityId : null} onSelectRestrictionSite={selectRestrictionSite} diagnostics={[...appDiagnostics, ...(active ? documentDiagnostics[active.id] ?? [] : [])]} findProps={{
+        {bottomOpen && <BottomPanel view={bottomView} active={active} setView={setBottomPanelView} zoom={zoom} setZoom={setZoom} showEnzymes={showEnzymes} setShowEnzymes={setShowEnzymes} showFeatureLabels={showFeatureLabels} setShowFeatureLabels={setShowFeatureLabels} showPrimers={showPrimers} setShowPrimers={setShowPrimers} primerChecks={primerChecks} restrictionSites={restrictionSites} restrictionSitesTruncated={restrictionScan.truncated} selectedRestrictionId={activeSelection?.source === "restriction" ? activeSelection.entityId : null} onSelectRestrictionSite={selectRestrictionSite} diagnostics={[...appDiagnostics, ...(active ? documentDiagnostics[active.id] ?? [] : [])]} findProps={{
           query: findQuery,
           validationError: findValidation.error ?? visibleFindAnalysis?.error ?? null,
           loading: visibleFindAnalysis?.loading ?? false,
@@ -1568,7 +1952,9 @@ export default function App() {
 
       <footer className="statusbar"><button onClick={() => setBottomOpen((value) => !value)}>{bottomOpen ? "⌄" : "⌃"}</button><span className="status-ready" /> <strong>{status}</strong><div />{active && <><span>{active.document.topology === "circular" ? "Circular" : "Linear"}</span><span>dsDNA</span><span className="mono">{active.length.toLocaleString()} bp</span><span className="mono">GC {active.gcPercent.toFixed(1)}%</span></>}</footer>
       {newDocumentOpen && <NewDocumentSheet suggestedName={nextUntitledName(documents.map((document) => document.document.name))} onClose={() => setNewDocumentOpen(false)} onCreate={createNewDocument} />}
-      {workflow && active && <WorkflowSheet workflow={workflow} active={active} onClose={() => setWorkflow(null)} onCreate={createPcrProduct} />}
+      {workflow && active && <WorkflowSheet workflow={workflow} active={active} onClose={requestCloseWorkflow} onCreate={createPcrProduct} onBusyChange={updateWorkflowBusy} />}
+      {annotationEditor?.kind === "feature" && annotationDocument && <FeatureEditor key={`${annotationEditor.documentId}:${annotationEditor.revision}:${annotationEditor.index ?? "new"}`} documentName={annotationDocument.document.name} sequence={annotationDocument.document.sequence} topology={annotationDocument.document.topology} feature={annotationEditor.index === null ? null : annotationDocument.document.features[annotationEditor.index] ?? null} suggestedIntervals={annotationEditor.index === null && sequenceSelections[annotationEditor.documentId]?.revision === annotationEditor.revision ? sequenceSelections[annotationEditor.documentId]?.intervals ?? [] : []} onClose={closeAnnotationEditor} onDirtyChange={(dirty) => setDocumentDraftState(annotationEditor.documentId, dirty)} onSave={saveFeatureAnnotation} onDelete={annotationEditor.index === null ? undefined : deleteFeatureAnnotation} />}
+      {annotationEditor?.kind === "primer" && annotationDocument && <PrimerEditor key={`${annotationEditor.documentId}:${annotationEditor.revision}:${annotationEditor.index ?? "new"}`} documentName={annotationDocument.document.name} sequence={annotationDocument.document.sequence} topology={annotationDocument.document.topology} primer={annotationEditor.index === null ? null : annotationDocument.document.primers[annotationEditor.index] ?? null} onClose={closeAnnotationEditor} onDirtyChange={(dirty) => setDocumentDraftState(annotationEditor.documentId, dirty)} onSave={savePrimerAnnotation} onDelete={annotationEditor.index === null ? undefined : deletePrimerAnnotation} />}
       {closeRequest && <UnsavedChangesSheet
         documentNames={closeRequest.kind === "quit"
           ? documents.filter((document) => document.dirty).map((document) => document.document.name)

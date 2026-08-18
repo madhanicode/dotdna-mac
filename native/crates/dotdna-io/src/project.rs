@@ -90,6 +90,8 @@ struct LegacyHistorySnapshot {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyFeature {
+    #[serde(default)]
+    id: Option<String>,
     name: String,
     #[serde(rename = "type")]
     kind: String,
@@ -119,6 +121,8 @@ struct LegacySegment {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyPrimer {
+    #[serde(default)]
+    id: Option<String>,
     name: String,
     sequence: String,
     binding_length: Option<usize>,
@@ -243,6 +247,7 @@ fn segment_from_legacy(segment: LegacySegment) -> Option<FeatureSegment> {
 impl From<LegacyFeature> for Feature {
     fn from(feature: LegacyFeature) -> Self {
         let LegacyFeature {
+            id,
             name,
             kind,
             color,
@@ -254,6 +259,7 @@ impl From<LegacyFeature> for Feature {
             ..
         } = feature;
         Self {
+            id,
             name,
             kind,
             color,
@@ -271,6 +277,7 @@ impl From<LegacyFeature> for Feature {
 impl From<LegacyPrimer> for Primer {
     fn from(primer: LegacyPrimer) -> Self {
         Self {
+            id: primer.id,
             name: primer.name,
             sequence: primer.sequence,
             binding_length: primer.binding_length,
@@ -411,6 +418,7 @@ impl From<&Feature> for LegacyFeature {
             .map(LegacySegment::from)
             .collect::<Vec<_>>();
         Self {
+            id: feature.id.clone(),
             name: feature.name.clone(),
             kind: feature.kind.clone(),
             range: (!segments.is_empty()).then(|| {
@@ -433,6 +441,7 @@ impl From<&Feature> for LegacyFeature {
 impl From<&Primer> for LegacyPrimer {
     fn from(primer: &Primer) -> Self {
         Self {
+            id: primer.id.clone(),
             name: primer.name.clone(),
             sequence: primer.sequence.clone(),
             binding_length: primer.binding_length,
