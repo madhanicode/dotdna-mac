@@ -91,6 +91,22 @@ export type DocumentSummary = {
   }>;
 };
 
+export type ProjectFolderFile = {
+  path: string;
+  relativePath: string;
+  name: string;
+  format: string;
+  byteLength: number;
+};
+
+export type ProjectFolderSummary = {
+  path: string;
+  name: string;
+  files: ProjectFolderFile[];
+  truncated: boolean;
+  warnings: string[];
+};
+
 export type DocumentView = "map" | "sequence" | "features" | "primers" | "history";
 
 export type OpenDocument = DocumentSummary & {

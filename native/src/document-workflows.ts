@@ -5,6 +5,8 @@ type SaveDocumentState = Pick<OpenDocument, "dirty" | "format" | "path" | "docum
 export type NativeMenuState = {
   newDocument: boolean;
   openDocument: boolean;
+  openFolder: boolean;
+  commandPalette: boolean;
   save: boolean;
   saveAs: boolean;
   close: boolean;
@@ -20,6 +22,8 @@ export function nativeMenuPayload(state: NativeMenuState) {
   const enabled = [
     state.newDocument ? "file.new" : null,
     state.openDocument ? "file.open" : null,
+    state.openFolder ? "file.open-folder" : null,
+    state.commandPalette ? "view.command-palette" : null,
     state.save ? "file.save" : null,
     state.saveAs ? "file.save-as" : null,
     state.close ? "file.close" : null,
@@ -45,6 +49,8 @@ export function nativeMenuState(input: {
   return {
     newDocument: !blocked,
     openDocument: !blocked,
+    openFolder: !blocked,
+    commandPalette: !blocked,
     save: !blocked && input.hasActiveDocument && input.activeCanSave,
     saveAs: !blocked && input.hasActiveDocument && !input.activeBusy,
     close: !blocked && !input.closeBusy && input.hasActiveDocument && !input.activeBusy,

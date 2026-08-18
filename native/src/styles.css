@@ -44,7 +44,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .brand em { border: 1px solid #45515a; color: #82909b; font-size: 7px; font-style: normal; letter-spacing: .08em; padding: 2px 3px; }
 .title-document { color: #aeb2b8; font-size: 11px; font-weight: 500; max-width: 500px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .title-actions { display: flex; justify-content: flex-end; }
-.title-actions button { background: #202328; border: 1px solid #31353b; border-radius: 4px; color: #737983; font-family: var(--mono); font-size: 8px; padding: 3px 6px; }
+.title-actions button { background: #202328; border: 1px solid #31353b; border-radius: 4px; color: #9ca4ad; font-family: var(--mono); font-size: 8px; padding: 3px 6px; }
+.title-actions button:hover { background: #2b3035; border-color: #46515a; color: #d6dde1; }
 
 .toolbar { align-items: stretch; background: linear-gradient(#24272b, #1c1e22); border-bottom: 1px solid #08090a; box-shadow: 0 1px 0 #303338 inset; display: flex; min-width: 0; padding: 3px 8px 4px; position: relative; z-index: 20; }
 .tool-group { align-items: stretch; display: flex; gap: 1px; }
@@ -95,18 +96,66 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .file-row small { color: #686e76; font-family: var(--mono); font-size: 8px; margin-top: 3px; }
 .file-row.active small { color: #8cbbc2; }
 .file-row em { color: var(--cyan); font-size: 7px; }
-.folder-section { border-top: 1px solid #292c31; }
+.open-documents-section { flex: 0 1 35%; min-height: 72px; overflow: auto; }
+.folder-section { border-top: 1px solid #292c31; display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; overflow: hidden; }
 .folder-empty { color: #60666e; font-size: 9px; margin: 8px 7px; }
 .folder-row, .folder-child { align-items: center; background: transparent; border: 0; border-radius: 3px; color: #a8adb4; display: flex; font-size: 10px; gap: 6px; padding: 5px 7px; text-align: left; width: 100%; }
 .folder-row:hover, .folder-child:hover { background: #23262a; }
 .folder-row > span { color: #777d85; font-size: 8px; }
 .folder-row > i { color: #bb9151; font-size: 12px; }
-.folder-child { color: #858b93; padding-left: 30px; }
+.folder-child { color: #858b93; display: grid; flex: 0 0 auto; grid-template-columns: 11px minmax(0, 1fr) auto; padding: 5px 7px 5px 18px; }
 .folder-child > i { height: 9px; transform: scale(.72); width: 9px; }
+.folder-child > span { min-width: 0; }
+.folder-child strong, .folder-child small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-child strong { color: #b5bac0; font-size: 9px; font-weight: 500; }
+.folder-child small { color: #737b83; font-family: var(--mono); font-size: 9px; margin-top: 2px; }
+.folder-child.open strong { color: #d0d5da; }
+.folder-child.active { background: #284952; box-shadow: 0 0 0 1px #37606a inset; }
+.folder-child > em { color: var(--cyan); font-size: 7px; font-style: normal; }
+.folder-root { align-items: center; background: #1d2024; border-bottom: 1px solid #2b2f34; display: grid; gap: 5px; grid-template-columns: 12px minmax(0, 1fr) 22px 22px; margin: 0 -5px; min-height: 36px; padding: 5px 7px; }
+.folder-root > i { color: #bb9151; font-size: 9px; font-style: normal; }
+.folder-root > span { min-width: 0; }
+.folder-root strong, .folder-root small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-root strong { color: #c8cdd2; font-size: 9px; }
+.folder-root small { color: #727a82; font-family: var(--mono); font-size: 9px; margin-top: 2px; }
+.folder-root button { background: transparent; border: 0; border-radius: 2px; color: #778089; height: 22px; padding: 0; }
+.folder-root button:hover:not(:disabled) { background: #30353a; color: #d0d6da; }
+.folder-files { flex: 1 1 auto; min-height: 0; overflow: auto; padding-top: 3px; }
+.folder-state { align-items: flex-start; color: #7e878f; display: flex; flex-direction: column; font-size: 9px; gap: 5px; line-height: 1.4; padding: 10px 8px; }
+.folder-state > strong { color: #b7bdc2; font-size: 10px; }
+.folder-state > button { background: #292e33; border: 1px solid #41474e; border-radius: 3px; color: #c3c9ce; font-size: 8px; margin-top: 3px; padding: 5px 7px; }
+.folder-state.error { background: rgba(103,54,49,.18); color: #c58e87; }
+.folder-spinner { animation: folder-spin .8s linear infinite; border: 1px solid #4d5961; border-right-color: var(--cyan); border-radius: 50%; height: 12px; width: 12px; }
+@keyframes folder-spin { to { transform: rotate(360deg); } }
+.folder-warning { background: #342e20; border-top: 1px solid #55492d; color: #b8a16d; font-size: 9px; line-height: 1.35; margin: 0 -5px; padding: 5px 8px; }
+.folder-warnings { border-top: 1px solid #34383d; color: #858c93; flex: 0 0 auto; font-size: 9px; margin: 0 -5px; max-height: 80px; overflow: auto; padding: 5px 8px; }
+.folder-warnings summary { color: #a68c69; cursor: default; }
+.folder-warnings p { margin: 4px 0; user-select: text; }
 .project-sidebar > footer { border-top: 1px solid #292c31; margin-top: auto; padding: 6px; }
 .project-sidebar > footer button { background: transparent; border: 0; border-radius: 3px; color: #747a83; font-size: 9px; padding: 6px; text-align: left; width: 100%; }
 .project-sidebar > footer button:hover { background: #23262a; color: #b7bbc1; }
+.project-sidebar > footer button { align-items: center; display: flex; justify-content: space-between; }
+.project-sidebar > footer kbd { color: #69727a; font-family: var(--mono); font-size: 8px; }
 .project-sidebar button:disabled { cursor: not-allowed; opacity: .42; }
+
+.command-palette-backdrop { align-items: flex-start; background: rgba(4,5,6,.7); display: flex; inset: 0; justify-content: center; padding: min(12vh, 105px) 18px 18px; position: fixed; z-index: 800; }
+.command-palette { background: #1b1e22; border: 1px solid #4a5158; border-radius: 7px; box-shadow: 0 24px 70px #000c; display: grid; grid-template-rows: 47px minmax(0, 1fr) 27px; max-height: min(620px, calc(100vh - 120px)); overflow: hidden; width: min(660px, calc(100vw - 36px)); }
+.command-palette > header { align-items: center; border-bottom: 1px solid #333940; display: grid; gap: 9px; grid-template-columns: auto minmax(0, 1fr) auto; padding: 7px 10px; }
+.command-palette > header > span { border: 1px solid #465059; border-radius: 3px; color: var(--cyan); font-family: var(--mono); font-size: 8px; padding: 4px 5px; }
+.command-palette input { background: transparent; border: 0; color: #e2e6e9; font-size: 13px; height: 31px; outline: 0; width: 100%; }
+.command-palette input::placeholder { color: #687078; }
+.command-palette kbd { background: #292e33; border: 1px solid #41474e; border-radius: 3px; color: #8c959d; font-family: var(--mono); font-size: 8px; padding: 3px 5px; white-space: nowrap; }
+.command-results { min-height: 90px; overflow: auto; padding: 6px; }
+.command-results > p { color: #747c84; font-size: 10px; margin: 18px 11px; }
+.command-result-wrap > small { color: #707980; display: block; font-size: 8px; font-weight: 700; letter-spacing: .1em; padding: 9px 8px 4px; text-transform: uppercase; }
+.command-result-wrap > button { align-items: center; background: transparent; border: 1px solid transparent; border-radius: 4px; display: flex; justify-content: space-between; min-height: 43px; padding: 6px 8px; text-align: left; width: 100%; }
+.command-result-wrap > button.selected:not([aria-disabled="true"]) { background: #283b40; border-color: #37616a; }
+.command-result-wrap > button[aria-disabled="true"] { opacity: .4; }
+.command-result-wrap > button > span { display: flex; flex-direction: column; min-width: 0; }
+.command-result-wrap strong { color: #d6dce0; font-size: 11px; font-weight: 600; }
+.command-result-wrap em { color: #879099; font-size: 9px; font-style: normal; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-palette > footer { align-items: center; background: #17191c; border-top: 1px solid #30353a; color: #7a838b; display: flex; font-size: 8px; gap: 15px; padding: 0 11px; }
+.command-palette > footer b { color: #a2abb2; font-family: var(--mono); font-weight: 500; }
 
 .document-area { background: #121316; display: grid; grid-column: 2; grid-row: 1; grid-template-rows: 31px 32px minmax(0, 1fr); min-height: 0; min-width: 0; overflow: hidden; }
 .document-tabs { align-items: end; background: #0f1012; border-bottom: 1px solid #08090a; display: flex; min-width: 0; overflow: hidden; padding: 2px 3px 0; }

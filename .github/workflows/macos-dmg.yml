@@ -65,6 +65,22 @@ jobs:
           test -n "$APPLE_PASSWORD"
           test -n "$APPLE_TEAM_ID"
 
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/dotdna-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/dotdna-signing.keychain-db"
+          KEYCHAIN_PASSWORD="dotdna-ci-keychain"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
       - name: Bundle Apple Silicon app and DMG
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -75,12 +91,18 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: pnpm --dir native tauri:build
 
+      - name: Archive signed app bundle
+        run: |
+          APP_PATH="$(find native/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          /usr/bin/ditto -c -k --keepParent "$APP_PATH" native/target/aarch64-apple-darwin/release/bundle/macos/DOTDNA_app.zip
+
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: DOTDNA-macOS-Apple-Silicon
           path: |
-            native/target/aarch64-apple-darwin/release/bundle/macos/*.app
+            native/target/aarch64-apple-darwin/release/bundle/macos/DOTDNA_app.zip
             native/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
 

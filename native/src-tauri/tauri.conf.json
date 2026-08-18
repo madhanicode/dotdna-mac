@@ -32,7 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": ["app"],
     "icon": ["icons/icon.icns"],
     "category": "Education",
     "shortDescription": "A fast, precise DNA design workbench.",

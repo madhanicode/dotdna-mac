@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build --target aarch64-apple-darwin"
+    "tauri:build:app": "tauri build --target aarch64-apple-darwin --bundles app",
+    "tauri:build": "pnpm tauri:build:app && ./scripts/create-dmg.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

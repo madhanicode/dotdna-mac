@@ -14,6 +14,11 @@ New, Open, Save, and Save As workflows with unsaved-change protection and
 conflict-aware atomic project writes. Controls that are not implemented yet are
 visibly disabled rather than showing synthetic scientific results.
 
+The project sidebar can scan real folders for supported DNA documents without
+following symlinks or indexing dependency/build caches. The command palette
+(`⌘K`) exposes the implemented file, view, annotation, search, and PCR actions
+with the same safety guards as the toolbar and native macOS menus.
+
 Sequence data is processed entirely on the device. The Tauri application does
 not start a local server and does not require the hosted DOTDNA site.
 
@@ -38,7 +43,8 @@ cd native && cargo test --workspace
 
 ## Standalone Mac app
 
-The current native rewrite builds an Apple-silicon Tauri DMG:
+The current native rewrite builds an Apple-silicon app and a deterministic
+drag-to-Applications DMG without depending on Finder automation:
 
 ```bash
 pnpm --dir native tauri:build

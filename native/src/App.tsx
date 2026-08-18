@@ -5,12 +5,13 @@ import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { FeatureEditor, PrimerEditor } from "./AnnotationEditors";
+import { CommandPalette, type PaletteCommand } from "./CommandPalette";
 import { demoDocument } from "./demo";
 import { canSaveDocument, defaultProjectPath, directProjectPath, documentSavepoint, findOpenDocumentByPath, matchesDocumentSavepoint, nativeMenuPayload, nativeMenuState, nextUntitledName } from "./document-workflows";
 import { scanRestrictionSites, type RestrictionSite } from "./restriction-sites";
 import { SequenceView } from "./SequenceView";
 import { displayIntervals, normalizeIntervals, selectionLength, validateFindQuery, type SequenceMatch, type SequenceSelection } from "./sequence-selection";
-import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, OpenReadingFrame, OrfTranslation, PcrCommandResult, Primer, PrimerCheck, SequenceDocument } from "./types";
+import type { CommandError, DocumentSummary, DocumentView, Feature, OpenDocument, OpenReadingFrame, OrfTranslation, PcrCommandResult, Primer, PrimerCheck, ProjectFolderSummary, SequenceDocument } from "./types";
 
 const PlasmidMap = lazy(() => import("./PlasmidMap").then((module) => ({ default: module.PlasmidMap })));
 
@@ -84,6 +85,12 @@ function asOpenDocument(summary: DocumentSummary): OpenDocument {
 function cutBoundaryLabel(position: number | null) {
   if (position === null) return "Outside molecule";
   return position === 0 ? "Before base 1" : `After base ${position.toLocaleString()}`;
+}
+
+function displayFileSize(bytes: number) {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(bytes < 10_240 ? 1 : 0)} KB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`;
 }
 
 function Icon({ name }: { name: string }) {
@@ -689,6 +696,11 @@ export default function App() {
   const [orfTranslations, setOrfTranslations] = useState<Record<string, OrfTranslation | null>>({});
   const [showTranslations, setShowTranslations] = useState<Record<string, boolean>>({});
   const [projectSearch, setProjectSearch] = useState("");
+  const [projectFolder, setProjectFolder] = useState<ProjectFolderSummary | null>(null);
+  const [projectFolderLoading, setProjectFolderLoading] = useState(false);
+  const [projectFolderError, setProjectFolderError] = useState<string | null>(null);
+  const [projectFolderRequestedPath, setProjectFolderRequestedPath] = useState<string | null>(null);
+  const [focusedProjectFilePath, setFocusedProjectFilePath] = useState<string | null>(null);
   const [status, setStatus] = useState("Ready");
   const [monochrome, setMonochrome] = useState(false);
   const [documentZooms, setDocumentZooms] = useState<Record<string, number>>({});
@@ -705,6 +717,7 @@ export default function App() {
   const [closeRequest, setCloseRequest] = useState<CloseRequest | null>(null);
   const [closeRequestBusy, setCloseRequestBusy] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [primerChecks, setPrimerChecks] = useState<PrimerCheck[]>([]);
   const [appDiagnostics, setAppDiagnostics] = useState<Diagnostic[]>([]);
   const [documentDiagnostics, setDocumentDiagnostics] = useState<Record<string, Diagnostic[]>>({});
@@ -719,6 +732,16 @@ export default function App() {
   const menuActionRef = useRef<(id: string) => void>(() => undefined);
   const menuStateSyncRef = useRef<Promise<unknown>>(Promise.resolve());
   const openingDocumentRef = useRef(false);
+  const openingFolderDialogRef = useRef(false);
+  const projectFolderScanTokenRef = useRef(0);
+  const projectFolderScanInFlightRef = useRef(false);
+  const queuedProjectFolderScanRef = useRef<(() => void) | null>(null);
+  const projectFileButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const projectFileTypeaheadRef = useRef({ query: "", at: 0 });
+  const commandPaletteLauncherRef = useRef<HTMLButtonElement>(null);
+  const commandPaletteReturnFocusRef = useRef<HTMLElement | null>(null);
+  const lastCommandPaletteToggleRef = useRef(0);
+  const commandPaletteOpenRef = useRef(commandPaletteOpen);
   const reservedSavePathsRef = useRef<Map<string, string>>(new Map());
   const newDocumentOpenRef = useRef(newDocumentOpen);
   const workflowRef = useRef(workflow);
@@ -737,6 +760,7 @@ export default function App() {
   workflowRef.current = workflow;
   workflowBusyRef.current = workflowBusy;
   annotationEditorRef.current = annotationEditor;
+  commandPaletteOpenRef.current = commandPaletteOpen;
 
   const active = documents.find((document) => document.id === activeId) ?? null;
   const annotationDocument = annotationEditor ? documents.find((document) => document.id === annotationEditor.documentId) ?? null : null;
@@ -751,18 +775,41 @@ export default function App() {
   const activeCanSave = canSaveDocument(active, activeBusy);
   const canUndo = active ? !activeBusy && (editHistories[active.id]?.undo.length ?? 0) > 0 : false;
   const canRedo = active ? !activeBusy && (editHistories[active.id]?.redo.length ?? 0) > 0 : false;
-  const nativeMenu = nativeMenuState({
+  const blockingModalOpen = newDocumentOpen || workflow !== null || annotationEditor !== null || closeRequest !== null;
+  const commandEligibility = nativeMenuState({
     hasActiveDocument: active !== null,
     activeBusy,
     activeCanSave,
     canUndo,
     canRedo,
     hasDraft: draftDocumentIds.size > 0,
-    modalOpen: newDocumentOpen || workflow !== null || annotationEditor !== null || closeRequest !== null,
+    modalOpen: blockingModalOpen,
     closeBusy: closeRequestBusy,
     activeView: active?.view ?? null,
   });
+  const nativeMenu = commandPaletteOpen ? nativeMenuState({
+    hasActiveDocument: active !== null,
+    activeBusy,
+    activeCanSave,
+    canUndo,
+    canRedo,
+    hasDraft: draftDocumentIds.size > 0,
+    modalOpen: true,
+    closeBusy: closeRequestBusy,
+    activeView: active?.view ?? null,
+  }) : commandEligibility;
   const filteredDocuments = useMemo(() => documents.filter((document) => document.document.name.toLowerCase().includes(projectSearch.toLowerCase())), [documents, projectSearch]);
+  const filteredProjectFiles = useMemo(() => projectFolder?.files.filter((file) => `${file.name} ${file.relativePath} ${file.format}`.toLowerCase().includes(projectSearch.toLowerCase())) ?? [], [projectFolder, projectSearch]);
+  const activeProjectFileVisible = useMemo(() => filteredProjectFiles.some((file) => file.path === active?.path), [active?.path, filteredProjectFiles]);
+  const focusedProjectFileVisible = useMemo(() => filteredProjectFiles.some((file) => file.path === focusedProjectFilePath), [filteredProjectFiles, focusedProjectFilePath]);
+
+  useEffect(() => {
+    setFocusedProjectFilePath((current) => {
+      if (!filteredProjectFiles.length) return null;
+      if (current && filteredProjectFiles.some((file) => file.path === current)) return current;
+      return activeProjectFileVisible && active?.path ? active.path : filteredProjectFiles[0].path;
+    });
+  }, [active?.path, activeProjectFileVisible, filteredProjectFiles]);
   const restrictionScan = useMemo(() => active ? scanRestrictionSites(active.document.sequence, active.document.topology === "circular") : { sites: [], truncated: false }, [active?.document.sequence, active?.document.topology]);
   const restrictionSites = restrictionScan.sites;
   const findQuery = active ? findQueries[active.id] ?? "" : "";
@@ -968,6 +1015,10 @@ export default function App() {
 
   function openOrfs() {
     if (!active) return;
+    if (pendingEditIdsRef.current.has(active.id) || pendingSaveIdsRef.current.has(active.id)) {
+      setStatus("Wait for the current edit or save before analyzing ORFs");
+      return;
+    }
     setActiveView("sequence");
     setBottomOpen(true);
     setBottomView("ORFs");
@@ -1238,7 +1289,7 @@ export default function App() {
   }
 
   function openFeatureEditor(index: number | null = null) {
-    if (!active || activeBusy) return;
+    if (!active || pendingEditIdsRef.current.has(active.id) || pendingSaveIdsRef.current.has(active.id)) return;
     if (draftDocumentIdsRef.current.has(active.id)) {
       focusDocumentDraft(active.id);
       return;
@@ -1248,7 +1299,7 @@ export default function App() {
   }
 
   function openPrimerEditor(index: number | null = null) {
-    if (!active || activeBusy) return;
+    if (!active || pendingEditIdsRef.current.has(active.id) || pendingSaveIdsRef.current.has(active.id)) return;
     if (draftDocumentIdsRef.current.has(active.id)) {
       focusDocumentDraft(active.id);
       return;
@@ -1351,6 +1402,44 @@ export default function App() {
     setSelectedPrimers((current) => ({ ...current, [annotationEditor.documentId]: null }));
   }
 
+  async function loadDocumentPath(path: string) {
+    setStatus(`Opening ${path.split("/").at(-1)}…`);
+    const summary = await invoke<DocumentSummary>("open_document", { path });
+    const alreadyOpen = findOpenDocumentByPath(documentsRef.current, summary.path);
+    if (alreadyOpen) {
+      setActiveId(alreadyOpen.id);
+      setStatus(`${summary.document.name} is already open`);
+      return;
+    }
+    const opened = asOpenDocument(summary);
+    savedContentRef.current[opened.id] = documentSavepoint(opened.document);
+    updateDocuments((current) => [...current, opened]);
+    setActiveId(opened.id);
+    setSelectedFeatures((current) => ({ ...current, [opened.id]: opened.document.features.length ? 0 : null }));
+    setAppDiagnostics([]);
+    setStatus(`Opened ${summary.document.name}`);
+  }
+
+  async function openDocumentPath(path: string) {
+    const blockingDraft = draftDocumentIdsRef.current.values().next().value as string | undefined;
+    if (blockingDraft) {
+      focusDocumentDraft(blockingDraft);
+      return;
+    }
+    if (openingDocumentRef.current) return;
+    openingDocumentRef.current = true;
+    try {
+      await loadDocumentPath(path);
+    } catch (error) {
+      setStatus(`Could not open document: ${String(error)}`);
+      setAppDiagnostics([{ level: "error", title: "Document could not be opened", body: `${String(error)} Check the file format and try again.` }]);
+      setBottomView("Warnings");
+      setBottomOpen(true);
+    } finally {
+      openingDocumentRef.current = false;
+    }
+  }
+
   async function openFile() {
     const blockingDraft = draftDocumentIdsRef.current.values().next().value as string | undefined;
     if (blockingDraft) {
@@ -1367,21 +1456,7 @@ export default function App() {
       });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (!path) return;
-      setStatus(`Opening ${path.split("/").at(-1)}…`);
-      const summary = await invoke<DocumentSummary>("open_document", { path });
-      const alreadyOpen = findOpenDocumentByPath(documentsRef.current, summary.path);
-      if (alreadyOpen) {
-        setActiveId(alreadyOpen.id);
-        setStatus(`${summary.document.name} is already open`);
-        return;
-      }
-      const opened = asOpenDocument(summary);
-      savedContentRef.current[opened.id] = documentSavepoint(opened.document);
-      updateDocuments((current) => [...current, opened]);
-      setActiveId(opened.id);
-      setSelectedFeatures((current) => ({ ...current, [opened.id]: opened.document.features.length ? 0 : null }));
-      setAppDiagnostics([]);
-      setStatus(`Opened ${summary.document.name}`);
+      await loadDocumentPath(path);
     } catch (error) {
       setStatus(`Could not open document: ${String(error)}`);
       setAppDiagnostics([{ level: "error", title: "Document could not be opened", body: `${String(error)} Check the file format and try again.` }]);
@@ -1390,6 +1465,66 @@ export default function App() {
     } finally {
       openingDocumentRef.current = false;
     }
+  }
+
+  function scanProjectFolder(path: string) {
+    const token = ++projectFolderScanTokenRef.current;
+    setProjectFolderRequestedPath(path);
+    setProjectFolderLoading(true);
+    setProjectFolderError(null);
+    setStatus(`Scanning ${path.split("/").filter(Boolean).at(-1) ?? "project folder"}…`);
+    const execute = () => {
+      if (projectFolderScanTokenRef.current !== token) return;
+      if (projectFolderScanInFlightRef.current) {
+        queuedProjectFolderScanRef.current = execute;
+        return;
+      }
+      projectFolderScanInFlightRef.current = true;
+      void invoke<ProjectFolderSummary>("scan_project_folder", { path }).then((summary) => {
+        if (projectFolderScanTokenRef.current !== token) return;
+        setProjectFolder(summary);
+        setStatus(`Opened project folder ${summary.name} · ${summary.files.length.toLocaleString()} DNA file${summary.files.length === 1 ? "" : "s"}${summary.truncated ? "+" : ""}`);
+      }).catch((error: unknown) => {
+        if (projectFolderScanTokenRef.current !== token) return;
+        setProjectFolderError(String(error));
+        setStatus(`Could not open project folder: ${String(error)}`);
+      }).finally(() => {
+        projectFolderScanInFlightRef.current = false;
+        if (projectFolderScanTokenRef.current === token) setProjectFolderLoading(false);
+        const queued = queuedProjectFolderScanRef.current;
+        queuedProjectFolderScanRef.current = null;
+        queued?.();
+      });
+    };
+    execute();
+  }
+
+  async function openProjectFolder() {
+    const blockingDraft = draftDocumentIdsRef.current.values().next().value as string | undefined;
+    if (blockingDraft) {
+      focusDocumentDraft(blockingDraft);
+      return;
+    }
+    if (openingFolderDialogRef.current) return;
+    openingFolderDialogRef.current = true;
+    let path: string | null = null;
+    try {
+      const selected = await open({ directory: true, multiple: false, title: "Open DOTDNA Project Folder" });
+      path = Array.isArray(selected) ? selected[0] ?? null : selected;
+    } finally {
+      openingFolderDialogRef.current = false;
+    }
+    if (path) scanProjectFolder(path);
+  }
+
+  function closeProjectFolder() {
+    projectFolderScanTokenRef.current += 1;
+    queuedProjectFolderScanRef.current = null;
+    setProjectFolder(null);
+    setProjectFolderLoading(false);
+    setProjectFolderError(null);
+    setProjectFolderRequestedPath(null);
+    setStatus("Closed project folder · open documents were preserved");
   }
 
   function closeDocument(id: string) {
@@ -1660,7 +1795,49 @@ export default function App() {
     setWorkflow(null);
   }
 
+  function openCommandPalette() {
+    if (commandPaletteOpen) return;
+    if (blockingModalOpen) {
+      setStatus("Finish the open sheet before searching commands");
+      return;
+    }
+    const blockingDraft = draftDocumentIdsRef.current.values().next().value as string | undefined;
+    if (blockingDraft) {
+      focusDocumentDraft(blockingDraft);
+      return;
+    }
+    commandPaletteReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : commandPaletteLauncherRef.current;
+    setActionsOpen(false);
+    setCommandPaletteOpen(true);
+  }
+
+  function closeCommandPalette(restoreFocus = true) {
+    if (!commandPaletteOpen) return;
+    setCommandPaletteOpen(false);
+    const returnFocus = commandPaletteReturnFocusRef.current;
+    commandPaletteReturnFocusRef.current = null;
+    window.requestAnimationFrame(() => {
+      if (!restoreFocus && document.activeElement && document.activeElement !== document.body) return;
+      const focusTarget = returnFocus?.isConnected ? returnFocus : commandPaletteLauncherRef.current;
+      focusTarget?.focus();
+      if (!document.activeElement || document.activeElement === document.body) commandPaletteLauncherRef.current?.focus();
+    });
+  }
+
+  function toggleCommandPalette() {
+    const now = window.performance.now();
+    if (now - lastCommandPaletteToggleRef.current < 180) return;
+    lastCommandPaletteToggleRef.current = now;
+      if (commandPaletteOpen) closeCommandPalette();
+    else openCommandPalette();
+  }
+
   function handleMenuAction(id: string) {
+    if (id === "view.command-palette") {
+      toggleCommandPalette();
+      return;
+    }
+    if (commandPaletteOpen) return;
     if (newDocumentOpen || workflow || annotationEditor || closeRequest) {
       if (id === "file.close" && !closeRequestBusy) {
         if (newDocumentOpen) setStatus("Use Cancel or Create Document to finish the new-document sheet.");
@@ -1672,6 +1849,7 @@ export default function App() {
     }
     if (id === "file.new") beginNewDocument();
     else if (id === "file.open") void openFile();
+    else if (id === "file.open-folder") void openProjectFolder();
     else if (id === "file.save") void saveActiveDocument();
     else if (id === "file.save-as") void saveActiveDocument(true);
     else if (id === "file.close" && active) closeDocument(active.id);
@@ -1689,6 +1867,11 @@ export default function App() {
   menuActionRef.current = handleMenuAction;
 
   function chooseWorkflow(next: Exclude<Workflow, null>) {
+    if (!active) return;
+    if (pendingEditIdsRef.current.has(active.id) || pendingSaveIdsRef.current.has(active.id)) {
+      setStatus("Wait for the current edit or save before opening a molecular workflow");
+      return;
+    }
     const blockingDraft = draftDocumentIdsRef.current.values().next().value as string | undefined;
     if (blockingDraft) {
       focusDocumentDraft(blockingDraft);
@@ -1769,6 +1952,12 @@ export default function App() {
       const editingText = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable);
       if (!event.metaKey) return;
       const key = event.key.toLowerCase();
+      if (key === "k") {
+        event.preventDefault();
+        toggleCommandPalette();
+        return;
+      }
+      if (commandPaletteOpen) return;
       if (newDocumentOpen || workflow || annotationEditor || closeRequest) {
         if (key === "w" && !closeRequestBusy) {
           event.preventDefault();
@@ -1793,7 +1982,8 @@ export default function App() {
         beginNewDocument();
       } else if (key === "o") {
         event.preventDefault();
-        void openFile();
+        if (event.shiftKey) void openProjectFolder();
+        else void openFile();
       } else if (key === "w" && active) {
         event.preventDefault();
         closeDocument(active.id);
@@ -1820,7 +2010,7 @@ export default function App() {
 
   useEffect(() => {
     syncNativeMenu();
-  }, [nativeMenu.newDocument, nativeMenu.openDocument, nativeMenu.save, nativeMenu.saveAs, nativeMenu.close, nativeMenu.undo, nativeMenu.redo, nativeMenu.changeView, nativeMenu.activeView]);
+  }, [nativeMenu.newDocument, nativeMenu.openDocument, nativeMenu.openFolder, nativeMenu.commandPalette, nativeMenu.save, nativeMenu.saveAs, nativeMenu.close, nativeMenu.undo, nativeMenu.redo, nativeMenu.changeView, nativeMenu.activeView]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -1839,6 +2029,11 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     let disposed = false;
     void getCurrentWindow().onCloseRequested((event) => {
+      if (commandPaletteOpenRef.current) {
+        commandPaletteOpenRef.current = false;
+        commandPaletteReturnFocusRef.current = null;
+        setCommandPaletteOpen(false);
+      }
       const draftDocumentId = draftDocumentIdsRef.current.values().next().value as string | undefined;
       if (draftDocumentId) {
         event.preventDefault();
@@ -1869,6 +2064,28 @@ export default function App() {
     };
   }, []);
 
+  const paletteCommands: PaletteCommand[] = [
+    { id: "new", label: "New DNA Document", detail: "Create a linear or circular sequence", group: "File", shortcut: "⌘N", keywords: ["sequence"], disabled: !commandEligibility.newDocument, disabledReason: "Finish the current draft or sheet first", run: beginNewDocument },
+    { id: "open", label: "Open DNA Document", detail: "Open SnapGene, GenBank, FASTA, text, or DOTDNA", group: "File", shortcut: "⌘O", keywords: ["import file"], disabled: !commandEligibility.openDocument, disabledReason: "Finish the current draft or sheet first", run: () => void openFile() },
+    { id: "open-folder", label: "Open Project Folder", detail: "Browse DNA files from a real folder", group: "File", shortcut: "⇧⌘O", keywords: ["workspace directory"], disabled: !commandEligibility.openFolder, disabledReason: "Finish the current draft or sheet first", run: () => void openProjectFolder() },
+    { id: "refresh-folder", label: "Refresh Project Folder", detail: "Rescan the current project folder", group: "File", keywords: ["workspace reload"], disabled: !projectFolder || projectFolderLoading, disabledReason: projectFolderLoading ? "Folder scan is already running" : "Open a project folder first", run: () => projectFolder && void scanProjectFolder(projectFolder.path) },
+    { id: "save", label: "Save Document", detail: "Save the current DOTDNA project", group: "File", shortcut: "⌘S", disabled: !commandEligibility.save, disabledReason: !active ? "No document is open" : activeBusy ? "Wait for the current edit or save" : "The project already matches disk", run: () => void saveActiveDocument() },
+    { id: "save-as", label: "Save Document As…", detail: "Write a new DOTDNA project file", group: "File", shortcut: "⇧⌘S", disabled: !commandEligibility.saveAs, disabledReason: !active ? "No document is open" : "Wait for the current edit or draft", run: () => void saveActiveDocument(true) },
+    { id: "close", label: "Close Document", detail: "Close the active tab with unsaved-change protection", group: "File", shortcut: "⌘W", disabled: !commandEligibility.close, disabledReason: !active ? "No document is open" : "Wait for the current edit, save, or draft", run: () => active && closeDocument(active.id) },
+    { id: "find", label: "Find Sequence", detail: "Highlight exact or IUPAC DNA matches", group: "Sequence", shortcut: "⌘F", keywords: ["search bases"], disabled: !commandEligibility.changeView, disabledReason: "Open an idle document first", run: openFind },
+    { id: "feature", label: "Add Feature", detail: "Annotate one or more sequence intervals", group: "Sequence", keywords: ["annotation"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => openFeatureEditor() },
+    { id: "primer", label: "Add Primer", detail: "Design a tailed or mutagenic primer", group: "Sequence", keywords: ["oligo"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => openPrimerEditor() },
+    { id: "orfs", label: "Analyze ORFs and Translations", detail: "Find complete ORFs across six reading frames", group: "Sequence", keywords: ["protein amino acid"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: openOrfs },
+    ...views.map<PaletteCommand>((view) => ({ id: `view-${view.id}`, label: `Show ${view.label} View`, detail: `Switch the active document to ${view.label}`, group: "View", shortcut: view.shortcut, disabled: !commandEligibility.changeView, disabledReason: "Open an idle document first", run: () => setActiveView(view.id) })),
+    { id: "split", label: splitActive ? "Close Map / Sequence Split" : "Open Map / Sequence Split", detail: "Synchronize map and sequence coordinates", group: "View", keywords: ["panes"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: toggleSplit },
+    { id: "project-sidebar", label: sidebarOpen ? "Hide Project Sidebar" : "Show Project Sidebar", detail: "Toggle open documents and project files", group: "View", run: () => setSidebarOpen((value) => !value) },
+    { id: "inspector", label: inspectorOpen ? "Hide Inspector" : "Show Inspector", detail: "Toggle document and selection details", group: "View", run: () => setInspectorOpen((value) => !value) },
+    { id: "monochrome", label: monochrome ? "Use Colored Bases" : "Use Monochrome Bases", detail: "Change sequence base coloring", group: "View", run: () => setMonochrome((value) => !value) },
+    { id: "pcr", label: "PCR…", detail: "Amplify between two stored primer sites", group: "Molecular Workflows", keywords: ["amplicon"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => chooseWorkflow("PCR") },
+    { id: "inverse-pcr", label: "Inverse PCR…", detail: "Mutate or delete circular DNA", group: "Molecular Workflows", keywords: ["mutagenesis"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => chooseWorkflow("Inverse PCR") },
+    { id: "overlap-pcr", label: "Overlap-Extension PCR…", detail: "Join overlapping PCR products", group: "Molecular Workflows", keywords: ["oe pcr assembly"], disabled: !active || activeBusy, disabledReason: "Open an idle document first", run: () => chooseWorkflow("Overlap-Extension PCR") },
+  ];
+
   const mapPane = active ? <Suspense fallback={<div className="map-loading">Starting accelerated map renderer…</div>}><PlasmidMap name={active.document.name} topology={active.document.topology} sequenceLength={active.length} features={active.document.features} primers={active.document.primers} restrictionSites={restrictionSites} restrictionSitesTruncated={restrictionScan.truncated} selection={activeSelection} selectedFeature={selectedFeature} selectedPrimer={selectedPrimer} onSelectFeature={selectFeature} onSelectPrimer={selectPrimer} onSelectRestrictionSite={selectRestrictionSite} zoom={zoom} showEnzymes={showEnzymes} showFeatureLabels={showFeatureLabels} showPrimers={showPrimers} /></Suspense> : null;
   const sequencePane = active ? <SequenceView key={active.id} sequence={active.document.sequence} monochrome={monochrome} disabled={activeBusy} selection={activeSelection} secondaryIntervals={bottomView === "Find" ? secondaryFindIntervals : []} translation={activeTranslation} features={active.document.features} primers={active.document.primers} onSelectFeature={selectFeature} onSelectPrimer={selectPrimer} onOpenTranslations={openOrfs} initialScrollTop={sequenceScrollTopsRef.current[active.id] ?? 0} onScrollTopChange={(scrollTop) => { sequenceScrollTopsRef.current[active.id] = scrollTop; }} onApply={(sequence) => applySequenceEdit(active.id, sequence)} onDraftStateChange={(dirty) => setDocumentDraftState(active.id, dirty)} /> : null;
 
@@ -1877,7 +2094,7 @@ export default function App() {
       <header className="titlebar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><i><span /><span /><span /></i><strong>DOTDNA</strong><em>LAB</em></div>
         <div className="title-document" data-tauri-drag-region>{active?.document.name ?? "No Document"}{active?.dirty ? " •" : ""}</div>
-        <div className="title-actions"><button disabled title="Command palette is planned but not implemented yet.">⌘K</button></div>
+        <div className="title-actions"><button aria-label="Search Commands" onClick={openCommandPalette} ref={commandPaletteLauncherRef} title="Search Commands… (⌘K)">⌘K</button></div>
       </header>
 
       <section className="toolbar">
@@ -1897,10 +2114,42 @@ export default function App() {
       <section className={`workspace${sidebarOpen ? "" : " no-sidebar"}${inspectorOpen ? "" : " no-inspector"}${bottomOpen ? "" : " no-bottom"}`}>
         {sidebarOpen && <aside className="project-sidebar">
           <header><strong>PROJECT</strong><button onClick={beginNewDocument} title="New DNA document (⌘N)">＋</button></header>
-          <div className="project-search"><Icon name="search" /><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Filter files" /></div>
-          <section><h3>OPEN DOCUMENTS <span>{documents.length}</span></h3>{filteredDocuments.map((document) => <button className={document.id === activeId ? "active file-row" : "file-row"} key={document.id} onClick={() => activateDocument(document.id)}><i className={document.document.topology} /><span><strong>{document.document.name}</strong><small>{document.length.toLocaleString()} bp · {document.format}</small></span>{document.dirty && <em>●</em>}</button>)}</section>
-          <section className="folder-section"><h3>PROJECT FOLDER</h3><p className="folder-empty">No folder is open.</p></section>
-          <footer><button disabled title="Folder workspaces are planned but not implemented yet.">＋ Open Folder…</button></footer>
+          <div className="project-search"><Icon name="search" /><input aria-label="Filter open documents and project folder files" value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Filter files" /></div>
+          <section className="open-documents-section"><h3>OPEN DOCUMENTS <span>{documents.length}</span></h3>{filteredDocuments.length ? filteredDocuments.map((document) => <button aria-label={`${document.document.name}, ${document.dirty ? "unsaved changes" : "saved"}, ${document.length.toLocaleString()} base pairs`} className={document.id === activeId ? "active file-row" : "file-row"} key={document.id} onClick={() => activateDocument(document.id)}><i className={document.document.topology} /><span><strong>{document.document.name}</strong><small>{document.length.toLocaleString()} bp · {document.format}</small></span>{document.dirty && <em title="Unsaved changes">●</em>}</button>) : <p className="folder-empty">{documents.length ? "No open documents match the filter." : "No documents are open."}</p>}</section>
+          <div aria-live="polite" className="sr-only" role="status">{projectFolderLoading ? "Scanning project folder for DNA files" : projectFolderError ? `Project folder error: ${projectFolderError}` : projectFolder ? `${projectFolder.name} contains ${projectFolder.files.length}${projectFolder.truncated ? " or more" : ""} supported DNA files` : "No project folder is open"}</div>
+          <section aria-busy={projectFolderLoading} className="folder-section">
+            <h3>PROJECT FOLDER {projectFolder && <span>{projectFolder.files.length}{projectFolder.truncated ? "+" : ""}</span>}</h3>
+            {projectFolder && <div className="folder-root" title={projectFolder.path}><i>▾</i><span><strong>{projectFolder.name}</strong><small>{projectFolder.path}</small></span><button aria-label="Refresh project folder" disabled={projectFolderLoading} onClick={() => void scanProjectFolder(projectFolder.path)} title="Refresh folder">↻</button><button aria-label="Close project folder" onClick={closeProjectFolder} title="Close folder">×</button></div>}
+            {projectFolderLoading && <div aria-busy="true" className="folder-state"><span className="folder-spinner" />Scanning DNA files…</div>}
+            {projectFolderError && <div className="folder-state error" role="alert"><strong>Folder unavailable</strong><span>{projectFolderError}</span>{(projectFolder?.path ?? projectFolderRequestedPath) && <button onClick={() => void scanProjectFolder(projectFolder?.path ?? projectFolderRequestedPath!)}>Retry</button>}</div>}
+            {!projectFolder && !projectFolderLoading && !projectFolderError && <div className="folder-state"><strong>No project folder</strong><span>Open a real folder to browse its DNA files.</span><button onClick={() => void openProjectFolder()}>Open Folder…</button></div>}
+            {projectFolder && !projectFolderLoading && filteredProjectFiles.length === 0 && <div className="folder-state"><strong>{projectFolder.files.length && projectSearch ? "No matching DNA files" : "No supported DNA files"}</strong><span>{projectFolder.files.length && projectSearch ? `Nothing in ${projectFolder.name} matches “${projectSearch}”.` : "Add a SnapGene, GenBank, FASTA, DOTDNA, or DNA text file."}</span>{projectFolder.files.length > 0 && projectSearch && <button onClick={() => setProjectSearch("")}>Clear Filter</button>}</div>}
+            {projectFolder && filteredProjectFiles.length > 0 && <div aria-label={`DNA files in ${projectFolder.name}`} className="folder-files" role="listbox">{filteredProjectFiles.map((file, index) => {
+              const openDocument = findOpenDocumentByPath(documents, file.path);
+              const isActive = openDocument?.id === activeId;
+              return <button aria-label={`${file.relativePath}, ${file.format}, ${displayFileSize(file.byteLength)}${openDocument ? `, open${openDocument.dirty ? " with unsaved changes" : ""}` : ""}`} aria-selected={isActive} className={`folder-child${isActive ? " active" : ""}${openDocument ? " open" : ""}`} key={file.path} onClick={() => void openDocumentPath(file.path)} onKeyDown={(event) => {
+                if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+                  event.preventDefault();
+                  const target = event.key === "Home" ? 0 : event.key === "End" ? filteredProjectFiles.length - 1 : Math.max(0, Math.min(filteredProjectFiles.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+                  projectFileButtonRefs.current[target]?.focus();
+                } else if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  void openDocumentPath(file.path);
+                } else if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.length === 1) {
+                  const now = window.performance.now();
+                  const previous = projectFileTypeaheadRef.current;
+                  const query = `${now - previous.at < 700 ? previous.query : ""}${event.key}`.toLowerCase();
+                  projectFileTypeaheadRef.current = { query, at: now };
+                  const offset = filteredProjectFiles.findIndex((candidate, candidateIndex) => candidateIndex > index && candidate.name.toLowerCase().startsWith(query));
+                  const wrapped = offset >= 0 ? offset : filteredProjectFiles.findIndex((candidate) => candidate.name.toLowerCase().startsWith(query));
+                  if (wrapped >= 0) projectFileButtonRefs.current[wrapped]?.focus();
+                }
+              }} onFocus={() => setFocusedProjectFilePath(file.path)} ref={(element) => { projectFileButtonRefs.current[index] = element; }} role="option" tabIndex={focusedProjectFilePath === file.path || (!focusedProjectFileVisible && index === 0) ? 0 : -1} title={file.path}><i /><span><strong>{file.name}</strong><small>{file.relativePath} · {file.format} · {displayFileSize(file.byteLength)}</small></span>{openDocument && <em title={openDocument.dirty ? "Open with unsaved changes" : "Open"}>{openDocument.dirty ? "●" : "•"}</em>}</button>;
+            })}</div>}
+            {projectFolder?.truncated && <p className="folder-warning">Showing the first 2,000 supported files from a bounded scan.</p>}
+            {projectFolder && projectFolder.warnings.length > 0 && <details className="folder-warnings"><summary>{projectFolder.warnings.length} scan warning{projectFolder.warnings.length === 1 ? "" : "s"}</summary>{projectFolder.warnings.slice(0, 10).map((warning) => <p key={warning}>{warning}</p>)}</details>}
+          </section>
+          <footer><button onClick={() => void openProjectFolder()}>＋ Open Folder… <kbd>⇧⌘O</kbd></button></footer>
         </aside>}
 
         <section className="document-area">
@@ -1965,6 +2214,7 @@ export default function App() {
         onDiscard={discardCloseRequest}
         onSave={() => void saveCloseRequest()}
       />}
+      {commandPaletteOpen && <CommandPalette commands={paletteCommands} onClose={closeCommandPalette} />}
     </main>
   );
 }

@@ -35,6 +35,26 @@ struct SavePathResolution {
     file_version: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectFolderFile {
+    path: PathBuf,
+    relative_path: PathBuf,
+    name: String,
+    format: &'static str,
+    byte_length: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectFolderSummary {
+    path: PathBuf,
+    name: String,
+    files: Vec<ProjectFolderFile>,
+    truncated: bool,
+    warnings: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeMenuState {
@@ -451,6 +471,219 @@ async fn resolve_save_path(path: String) -> Result<SavePathResolution, String> {
     tauri::async_runtime::spawn_blocking(move || resolve_save_path_blocking(Path::new(&path)))
         .await
         .map_err(|error| format!("The save-path worker stopped unexpectedly: {error}"))?
+}
+
+const MAX_PROJECT_FOLDER_FILES: usize = 2_000;
+const MAX_PROJECT_FOLDER_ENTRIES: usize = 20_000;
+const MAX_PROJECT_FOLDER_DEPTH: usize = 12;
+const MAX_PROJECT_FOLDER_WARNINGS: usize = 100;
+
+struct ProjectFolderScan {
+    visited_entries: usize,
+    truncated: bool,
+    warnings: Vec<String>,
+}
+
+fn project_file_format(path: &Path) -> Option<&'static str> {
+    let file_name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if file_name.ends_with(".dotdna.json") {
+        return Some("DOTDNA");
+    }
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "dotdna" => Some("DOTDNA"),
+        "dna" => Some("SnapGene"),
+        "gb" | "gbk" | "genbank" => Some("GenBank"),
+        "fa" | "fas" | "fasta" | "fna" => Some("FASTA"),
+        "txt" => Some("DNA text"),
+        _ => None,
+    }
+}
+
+fn ignored_project_directory(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "node_modules" | "target" | "dist" | "build" | "__pycache__" | ".venv"
+        )
+}
+
+fn add_project_warning(scan: &mut ProjectFolderScan, warning: String) {
+    if scan.warnings.len() < MAX_PROJECT_FOLDER_WARNINGS {
+        scan.warnings.push(warning);
+    }
+}
+
+fn bounded_project_entries(
+    root: &Path,
+    directory: &Path,
+    scan: &mut ProjectFolderScan,
+) -> Vec<std::fs::DirEntry> {
+    let canonical_directory = match std::fs::canonicalize(directory) {
+        Ok(path) if path.starts_with(root) => path,
+        Ok(path) => {
+            add_project_warning(
+                scan,
+                format!(
+                    "Skipped a folder outside the project root: {}",
+                    path.display()
+                ),
+            );
+            return Vec::new();
+        }
+        Err(error) => {
+            add_project_warning(
+                scan,
+                format!("Could not resolve {}: {error}", directory.display()),
+            );
+            return Vec::new();
+        }
+    };
+    let entries = match std::fs::read_dir(&canonical_directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            let relative = directory.strip_prefix(root).unwrap_or(directory);
+            add_project_warning(
+                scan,
+                format!("Could not read {}: {error}", relative.display()),
+            );
+            return Vec::new();
+        }
+    };
+    let mut readable_entries = Vec::new();
+    for entry in entries {
+        if scan.visited_entries >= MAX_PROJECT_FOLDER_ENTRIES {
+            scan.truncated = true;
+            break;
+        }
+        scan.visited_entries += 1;
+        match entry {
+            Ok(entry) => readable_entries.push(entry),
+            Err(error) => {
+                add_project_warning(scan, format!("A folder entry could not be read: {error}"));
+            }
+        }
+    }
+    readable_entries.sort_by_key(std::fs::DirEntry::file_name);
+    readable_entries
+}
+
+fn project_file_summary(
+    root: &Path,
+    entry: &std::fs::DirEntry,
+    metadata: &std::fs::Metadata,
+    format: &'static str,
+    scan: &mut ProjectFolderScan,
+) -> Option<ProjectFolderFile> {
+    let path = entry.path();
+    let canonical_path = match std::fs::canonicalize(&path) {
+        Ok(path) if path.starts_with(root) => path,
+        Ok(_) => return None,
+        Err(error) => {
+            add_project_warning(
+                scan,
+                format!("Could not resolve {}: {error}", path.display()),
+            );
+            return None;
+        }
+    };
+    let relative_path = canonical_path
+        .strip_prefix(root)
+        .unwrap_or(&canonical_path)
+        .to_path_buf();
+    Some(ProjectFolderFile {
+        name: entry.file_name().to_string_lossy().into_owned(),
+        path: canonical_path,
+        relative_path,
+        format,
+        byte_length: metadata.len(),
+    })
+}
+
+fn scan_project_directory(
+    root: &Path,
+    directory: &Path,
+    depth: usize,
+    files: &mut Vec<ProjectFolderFile>,
+    scan: &mut ProjectFolderScan,
+) {
+    if depth > MAX_PROJECT_FOLDER_DEPTH {
+        scan.truncated = true;
+        return;
+    }
+    for entry in bounded_project_entries(root, directory, scan) {
+        if files.len() >= MAX_PROJECT_FOLDER_FILES {
+            scan.truncated = true;
+            return;
+        }
+        let path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                add_project_warning(
+                    scan,
+                    format!("Could not inspect {}: {error}", path.display()),
+                );
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !ignored_project_directory(&name)
+                && scan.visited_entries < MAX_PROJECT_FOLDER_ENTRIES
+            {
+                scan_project_directory(root, &path, depth + 1, files, scan);
+            } else if !ignored_project_directory(&name) {
+                scan.truncated = true;
+            }
+            if files.len() >= MAX_PROJECT_FOLDER_FILES {
+                return;
+            }
+        } else if metadata.is_file()
+            && let Some(format) = project_file_format(&path)
+            && let Some(file) = project_file_summary(root, &entry, &metadata, format, scan)
+        {
+            files.push(file);
+        }
+    }
+}
+
+fn scan_project_folder_blocking(path: &Path) -> Result<ProjectFolderSummary, String> {
+    let root = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+    let metadata = std::fs::metadata(&root).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() {
+        return Err("Choose a folder containing DNA documents.".to_owned());
+    }
+    let mut files = Vec::new();
+    let mut scan = ProjectFolderScan {
+        visited_entries: 0,
+        truncated: false,
+        warnings: Vec::new(),
+    };
+    scan_project_directory(&root, &root, 0, &mut files, &mut scan);
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let name = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Project Folder")
+        .to_owned();
+    Ok(ProjectFolderSummary {
+        path: root,
+        name,
+        files,
+        truncated: scan.truncated,
+        warnings: scan.warnings,
+    })
+}
+
+#[tauri::command]
+async fn scan_project_folder(path: String) -> Result<ProjectFolderSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || scan_project_folder_blocking(Path::new(&path)))
+        .await
+        .map_err(|error| format!("The project-folder worker stopped unexpectedly: {error}"))?
 }
 
 fn create_document_blocking(request: &CreateDocumentRequest) -> Result<DocumentSummary, String> {
@@ -880,6 +1113,13 @@ fn build_file_submenu<R: tauri::Runtime>(
 
     let new_document = MenuItem::with_id(app, "file.new", "New DNA…", true, Some("CmdOrCtrl+N"))?;
     let open_document = MenuItem::with_id(app, "file.open", "Open…", true, Some("CmdOrCtrl+O"))?;
+    let open_folder = MenuItem::with_id(
+        app,
+        "file.open-folder",
+        "Open Project Folder…",
+        true,
+        Some("CmdOrCtrl+Shift+O"),
+    )?;
     let save_document = MenuItem::with_id(app, "file.save", "Save", true, Some("CmdOrCtrl+S"))?;
     let save_as = MenuItem::with_id(
         app,
@@ -902,6 +1142,7 @@ fn build_file_submenu<R: tauri::Runtime>(
         &[
             &new_document,
             &open_document,
+            &open_folder,
             &PredefinedMenuItem::separator(app)?,
             &save_document,
             &save_as,
@@ -953,7 +1194,15 @@ fn build_edit_submenu<R: tauri::Runtime>(
 fn build_view_submenu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> tauri::Result<tauri::menu::Submenu<R>> {
-    use tauri::menu::{CheckMenuItem, Submenu};
+    use tauri::menu::{CheckMenuItem, MenuItem, PredefinedMenuItem, Submenu};
+
+    let command_palette = MenuItem::with_id(
+        app,
+        "view.command-palette",
+        "Search Commands…",
+        true,
+        Some("CmdOrCtrl+K"),
+    )?;
 
     let map = CheckMenuItem::with_id(app, "view.map", "Map", false, true, Some("CmdOrCtrl+1"))?;
     let sequence = CheckMenuItem::with_id(
@@ -992,7 +1241,15 @@ fn build_view_submenu<R: tauri::Runtime>(
         app,
         "View",
         true,
-        &[&map, &sequence, &features, &primers, &history],
+        &[
+            &command_palette,
+            &PredefinedMenuItem::separator(app)?,
+            &map,
+            &sequence,
+            &features,
+            &primers,
+            &history,
+        ],
     )
 }
 
@@ -1079,11 +1336,13 @@ fn update_native_menu_state(app: tauri::AppHandle, state: NativeMenuState) -> Re
     for id in [
         "file.new",
         "file.open",
+        "file.open-folder",
         "file.save",
         "file.save-as",
         "file.close",
         "edit.undo-document",
         "edit.redo-document",
+        "view.command-palette",
     ] {
         set_native_menu_enabled(&app, id, enabled.contains(id))?;
     }
@@ -1121,6 +1380,7 @@ pub fn run() {
             open_document,
             save_document,
             resolve_save_path,
+            scan_project_folder,
             create_document,
             import_sequence,
             simulate_pcr_product,
@@ -1146,6 +1406,37 @@ mod tests {
         assert_eq!(result.length, 8);
         assert_eq!(result.format, "FASTA");
         assert_eq!(result.document.sequence, "ACGTACGT");
+    }
+
+    #[test]
+    fn project_folder_scan_is_bounded_sorted_and_does_not_follow_symlinks() {
+        static NEXT_PROJECT_SCAN: AtomicU64 = AtomicU64::new(0);
+        let nonce = NEXT_PROJECT_SCAN.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "dotdna-project-scan-{}-{nonce}",
+            std::process::id()
+        ));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("zeta.dna"), b"not parsed during scan").unwrap();
+        std::fs::write(nested.join("alpha.gbk"), b"not parsed during scan").unwrap();
+        std::fs::write(root.join("notes.md"), b"ignored").unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("node_modules/hidden.fasta"), b"ignored").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, nested.join("cycle")).unwrap();
+
+        let result = scan_project_folder_blocking(&root).unwrap();
+        assert!(!result.truncated);
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.files.len(), 2);
+        assert_eq!(
+            result.files[0].relative_path,
+            PathBuf::from("nested/alpha.gbk")
+        );
+        assert_eq!(result.files[1].relative_path, PathBuf::from("zeta.dna"));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

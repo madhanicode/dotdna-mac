@@ -79,6 +79,8 @@ describe("document save workflows", () => {
     })).toEqual({
       newDocument: true,
       openDocument: true,
+      openFolder: true,
+      commandPalette: true,
       save: true,
       saveAs: true,
       close: true,
@@ -101,7 +103,7 @@ describe("document save workflows", () => {
       closeBusy: false,
       activeView: "sequence",
     });
-    expect(state).toMatchObject({ newDocument: false, openDocument: false, save: false, saveAs: false, undo: false, redo: false, changeView: false });
+    expect(state).toMatchObject({ newDocument: false, openDocument: false, openFolder: false, commandPalette: false, save: false, saveAs: false, undo: false, redo: false, changeView: false });
     expect(state.close).toBe(false);
   });
 
@@ -126,6 +128,8 @@ describe("document save workflows", () => {
     expect(nativeMenuPayload({
       newDocument: true,
       openDocument: true,
+      openFolder: true,
+      commandPalette: true,
       save: false,
       saveAs: true,
       close: true,
@@ -134,7 +138,7 @@ describe("document save workflows", () => {
       changeView: true,
       activeView: "features",
     })).toEqual({
-      enabled: ["file.new", "file.open", "file.save-as", "file.close", "edit.undo-document", "view.map", "view.sequence", "view.features", "view.primers", "view.history"],
+      enabled: ["file.new", "file.open", "file.open-folder", "view.command-palette", "file.save-as", "file.close", "edit.undo-document", "view.map", "view.sequence", "view.features", "view.primers", "view.history"],
       activeView: "features",
     });
   });
