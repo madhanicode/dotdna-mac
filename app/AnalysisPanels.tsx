@@ -1,6 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { sortOrfs, sortRestrictionRows } from "./analysis-sort";
+import type { OrfSortKey, RestrictionSortKey, SortDirection } from "./analysis-sort";
+import { featureMatchesOrf } from "./orf-annotations";
 import {
   findOpenReadingFrames,
   findRestrictionSites,
@@ -10,14 +13,17 @@ import {
   RestrictionSite,
   simulateRestrictionDigest,
 } from "./sequence-analysis";
+import type { SnapGeneFeature } from "./snapgene";
 
 type Props = {
   sequence: string;
   circular: boolean;
+  annotations?: SnapGeneFeature[];
   onCreateCds?: (orf: OpenReadingFrame) => void;
 };
 
 type CutterMode = "all" | "unique" | "double" | "type-iis";
+type SortState<Key extends string> = { key: Key; direction: SortDirection };
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 const frames = [1, 2, 3, -1, -2, -3] as const;
@@ -44,12 +50,30 @@ function gelPosition(fragmentLength: number, maximumLength: number) {
   return 10 + ratio * 80;
 }
 
-export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
+function SortableTableHeader({ label, active, direction, onSort }: { label: string; active: boolean; direction: SortDirection; onSort: () => void }) {
+  return (
+    <th aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"}>
+      <button type="button" className={`table-sort-button ${active ? "active" : ""}`} onClick={onSort} title={`Sort by ${label}`}>
+        {label}<span aria-hidden="true">{active ? (direction === "asc" ? "↑" : "↓") : "↕"}</span>
+      </button>
+    </th>
+  );
+}
+
+function nextSort<Key extends string>(current: SortState<Key>, key: Key, defaultDirection: SortDirection) {
+  return current.key === key
+    ? { key, direction: current.direction === "asc" ? "desc" : "asc" } satisfies SortState<Key>
+    : { key, direction: defaultDirection } satisfies SortState<Key>;
+}
+
+export function AnalysisPanels({ sequence, circular, annotations = [], onCreateCds }: Props) {
   const [minimumAminoAcids, setMinimumAminoAcids] = useState(50);
   const [startMode, setStartMode] = useState<OrfStartMode>("atg");
   const [enzymeQuery, setEnzymeQuery] = useState("");
   const [cutterMode, setCutterMode] = useState<CutterMode>("all");
   const [selectedDigestEnzymes, setSelectedDigestEnzymes] = useState<string[]>([]);
+  const [orfSort, setOrfSort] = useState<SortState<OrfSortKey>>({ key: "length", direction: "desc" });
+  const [restrictionSort, setRestrictionSort] = useState<SortState<RestrictionSortKey>>({ key: "enzyme", direction: "asc" });
 
   const orfs = useMemo(
     () => findOpenReadingFrames(sequence, { minAminoAcids: minimumAminoAcids, startMode, circular }),
@@ -71,7 +95,7 @@ export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
       .map((enzyme) => ({ enzyme, sites: grouped.get(enzyme.name) ?? [] }))
       .filter(({ sites }) => sites.length > 0);
   }, [restrictionSites]);
-  const visibleEnzymeRows = useMemo(() => {
+  const filteredEnzymeRows = useMemo(() => {
     const query = enzymeQuery.trim().toLowerCase();
     return enzymeRows.filter(({ enzyme, sites }) => {
       if (query && !enzyme.name.toLowerCase().includes(query) && !enzyme.recognition.toLowerCase().includes(query)) return false;
@@ -81,6 +105,10 @@ export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
       return true;
     });
   }, [enzymeRows, enzymeQuery, cutterMode]);
+  const visibleEnzymeRows = useMemo(
+    () => sortRestrictionRows(filteredEnzymeRows, restrictionSort.key, restrictionSort.direction),
+    [filteredEnzymeRows, restrictionSort],
+  );
   const visibleSites = useMemo(
     () => visibleEnzymeRows.flatMap(({ sites }) => sites),
     [visibleEnzymeRows],
@@ -89,12 +117,21 @@ export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
     () => simulateRestrictionDigest(sequence, selectedDigestEnzymes, circular),
     [sequence, selectedDigestEnzymes, circular],
   );
-  const longestOrfs = orfs.slice(0, 10);
+  const sortedOrfs = useMemo(() => sortOrfs(orfs, orfSort.key, orfSort.direction), [orfs, orfSort]);
+  const displayedOrfs = sortedOrfs.slice(0, 10);
   const forwardCount = orfs.filter(({ strand }) => strand === "+").length;
   const reverseCount = orfs.length - forwardCount;
 
   function toggleDigestEnzyme(name: string) {
     setSelectedDigestEnzymes((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]);
+  }
+
+  function updateOrfSort(key: OrfSortKey, defaultDirection: SortDirection = "asc") {
+    setOrfSort((current) => nextSort(current, key, defaultDirection));
+  }
+
+  function updateRestrictionSort(key: RestrictionSortKey, defaultDirection: SortDirection = "asc") {
+    setRestrictionSort((current) => nextSort(current, key, defaultDirection));
   }
 
   return (
@@ -113,7 +150,7 @@ export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
             <div>
               <span className="analysis-number">01</span>
               <h4>Open reading frames</h4>
-              <p>Six-frame scan using the standard genetic code.</p>
+              <p>Six-frame scan with CDS creation linked directly to annotations.</p>
             </div>
             <div className="analysis-controls">
               <label>
@@ -142,16 +179,21 @@ export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
               <div className="orf-frame" key={frame}>
                 <b>{frame > 0 ? `+${frame}` : frame}</b>
                 <div className="orf-rail">
-                  {orfs.filter((orf) => orf.frame === frame).map((orf) =>
-                    spanSegments(orf.start, orf.end, orf.wrapsOrigin, sequence.length).map((segment, index) => (
-                      <span
-                        className={`orf-bar ${orf.strand === "+" ? "forward" : "reverse"}`}
+                  {orfs.filter((orf) => orf.frame === frame).map((orf) => {
+                    const annotated = annotations.some((feature) => featureMatchesOrf(feature, orf, sequence.length));
+                    return spanSegments(orf.start, orf.end, orf.wrapsOrigin, sequence.length).map((segment, index) => (
+                      <button
+                        type="button"
+                        className={`orf-bar ${orf.strand === "+" ? "forward" : "reverse"} ${annotated ? "annotated" : ""}`}
                         key={`${orf.id}-${index}`}
                         style={{ left: `${segment.left}%`, width: `${Math.max(segment.width, 0.45)}%` }}
-                        title={`Frame ${frame > 0 ? "+" : ""}${frame} · ${rangeLabel(orf)} · ${orf.aminoAcidLength} aa`}
+                        title={`${annotated ? "Annotated CDS" : "Create CDS annotation"} · Frame ${frame > 0 ? "+" : ""}${frame} · ${rangeLabel(orf)} · ${orf.aminoAcidLength} aa`}
+                        aria-label={`${annotated ? "Annotated CDS" : "Create CDS annotation"} for ORF frame ${frame > 0 ? "+" : ""}${frame}, ${rangeLabel(orf)}`}
+                        onClick={() => { if (!annotated) onCreateCds?.(orf); }}
+                        disabled={annotated || !onCreateCds}
                       />
-                    )),
-                  )}
+                    ));
+                  })}
                 </div>
               </div>
             ))}
@@ -159,21 +201,29 @@ export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
 
           <div className="analysis-table-wrap">
             <table className="analysis-table">
-              <thead><tr><th>Frame</th><th>Range</th><th>Length</th><th>Protein preview</th>{onCreateCds && <th>Annotation</th>}</tr></thead>
+              <thead><tr>
+                <SortableTableHeader label="Frame" active={orfSort.key === "frame"} direction={orfSort.direction} onSort={() => updateOrfSort("frame")} />
+                <SortableTableHeader label="Range" active={orfSort.key === "range"} direction={orfSort.direction} onSort={() => updateOrfSort("range")} />
+                <SortableTableHeader label="Length" active={orfSort.key === "length"} direction={orfSort.direction} onSort={() => updateOrfSort("length", "desc")} />
+                <SortableTableHeader label="Protein preview" active={orfSort.key === "protein"} direction={orfSort.direction} onSort={() => updateOrfSort("protein")} />
+                {onCreateCds && <th>Annotation</th>}
+              </tr></thead>
               <tbody>
-                {longestOrfs.map((orf) => (
+                {displayedOrfs.map((orf) => (
                   <tr key={orf.id}>
                     <td><span className={`strand-pill ${orf.strand === "+" ? "forward" : "reverse"}`}>{orf.frame > 0 ? `+${orf.frame}` : orf.frame}</span></td>
                     <td>{rangeLabel(orf)}</td>
                     <td>{numberFormatter.format(orf.aminoAcidLength)} aa</td>
                     <td className="protein-preview">{orf.protein.slice(0, 18)}{orf.protein.length > 18 ? "…" : ""}</td>
-                    {onCreateCds && <td><button type="button" className="orf-annotation-button" onClick={() => onCreateCds(orf)}>Create CDS</button></td>}
+                    {onCreateCds && <td>{annotations.some((feature) => featureMatchesOrf(feature, orf, sequence.length))
+                      ? <button type="button" className="orf-annotation-button annotated" disabled>Annotated ✓</button>
+                      : <button type="button" className="orf-annotation-button" onClick={() => onCreateCds(orf)}>Create CDS</button>}</td>}
                   </tr>
                 ))}
               </tbody>
             </table>
             {!orfs.length && <p className="analysis-empty">No complete ORFs meet these criteria.</p>}
-            {orfs.length > longestOrfs.length && <p className="table-note">Showing the 10 longest of {orfs.length} ORFs.</p>}
+            {orfs.length > displayedOrfs.length && <p className="table-note">Showing 10 of {orfs.length} ORFs in the selected sort order.</p>}
           </div>
         </article>
 
@@ -223,7 +273,13 @@ export function AnalysisPanels({ sequence, circular, onCreateCds }: Props) {
 
           <div className="analysis-table-wrap enzyme-table-wrap">
             <table className="analysis-table enzyme-table">
-              <thead><tr><th>Digest</th><th>Enzyme</th><th>Recognition</th><th>Sites</th><th>Coordinates</th></tr></thead>
+              <thead><tr>
+                <th>Digest</th>
+                <SortableTableHeader label="Enzyme" active={restrictionSort.key === "enzyme"} direction={restrictionSort.direction} onSort={() => updateRestrictionSort("enzyme")} />
+                <SortableTableHeader label="Recognition" active={restrictionSort.key === "recognition"} direction={restrictionSort.direction} onSort={() => updateRestrictionSort("recognition")} />
+                <SortableTableHeader label="Sites" active={restrictionSort.key === "sites"} direction={restrictionSort.direction} onSort={() => updateRestrictionSort("sites", "desc")} />
+                <SortableTableHeader label="Coordinates" active={restrictionSort.key === "coordinates"} direction={restrictionSort.direction} onSort={() => updateRestrictionSort("coordinates")} />
+              </tr></thead>
               <tbody>
                 {visibleEnzymeRows.slice(0, 24).map(({ enzyme, sites }) => (
                   <tr key={enzyme.name}>

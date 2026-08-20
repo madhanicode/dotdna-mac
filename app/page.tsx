@@ -5,6 +5,7 @@ import { AnalysisPanels } from "./AnalysisPanels";
 import { DesignVerifyTools } from "./DesignVerifyTools";
 import { DocumentInspector } from "./DocumentInspector";
 import { MolecularTools } from "./MolecularTools";
+import { createOrfCdsFeature } from "./orf-annotations";
 import { PlasmidMap } from "./PlasmidMap";
 import { SequenceEditor } from "./SequenceEditor";
 import type { AssemblyResult } from "./design-tools";
@@ -27,6 +28,7 @@ type HistoryEntry = RecoveryHistoryEntry;
 type WorkspaceSnapshot = RecoverySnapshot;
 
 type RecoveryStatus = "loading" | "idle" | "restored" | "saving" | "saved" | "error";
+type WorkspaceView = "split" | "sequence" | "plasmid";
 
 function coordinates(range: string | null) {
   const match = range?.match(/(\d+)\s*-\s*(\d+)/);
@@ -73,6 +75,7 @@ export default function Home() {
   const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus>("loading");
   const [recoveredAt, setRecoveredAt] = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("split");
 
   useEffect(() => {
     let active = true;
@@ -240,28 +243,11 @@ export default function Home() {
 
   function createCdsFromOrf(orf: OpenReadingFrame) {
     if (!data) return;
-    const color = orf.strand === "+" ? "#ff8a4c" : "#58c882";
-    const ranges = orf.wrapsOrigin
-      ? [`${orf.start}-${data.length}`, `1-${orf.end}`]
-      : [`${orf.start}-${orf.end}`];
+    const feature = createOrfCdsFeature(orf, data.length);
     const annotation: DisplayAnnotation = {
+      ...feature,
       id: `orf-${orf.id}-${Date.now()}`,
       isCustom: true,
-      name: `Predicted CDS ${orf.frame > 0 ? "+" : ""}${orf.frame}`,
-      type: "CDS",
-      range: ranges.join(", "),
-      color,
-      directionality: orf.strand === "+" ? 1 : 2,
-      strand: orf.strand,
-      segments: ranges.map((range) => {
-        const position = coordinates(range);
-        return { range, start: position?.start ?? null, end: position?.end ?? null, color, name: null, type: "standard" };
-      }),
-      qualifiers: [
-        { name: "translation", value: orf.protein },
-        { name: "note", value: `Predicted locally by DOTDNA in reading frame ${orf.frame > 0 ? "+" : ""}${orf.frame}` },
-      ],
-      readingFrame: Math.abs(orf.frame) - 1,
     };
     commitWorkspace(data, [...customAnnotations, annotation], `Created CDS annotation from ORF frame ${orf.frame > 0 ? "+" : ""}${orf.frame}`);
   }
@@ -438,7 +424,7 @@ export default function Home() {
   }
 
   return (
-    <main>
+    <main id="top">
       <header className="site-header">
         <a className="brand" href="#top" aria-label="DOTDNA home">
           <span className="brand-mark" aria-hidden="true">
@@ -451,7 +437,7 @@ export default function Home() {
         <span className="privacy-note"><span />Stays on your device</span>
       </header>
 
-      <section className="hero" id="top">
+      {!data && <section className="hero">
         <div className="hero-copy">
           <p className="eyebrow">Local-first plasmid workspace</p>
           <h1>Your plasmids,<br /><em>ready to work.</em></h1>
@@ -507,7 +493,7 @@ export default function Home() {
           </div>
           {error && <p className="error-message" role="alert">{error}</p>}
         </div>
-      </section>
+      </section>}
 
       {data ? (
         <section className="results" aria-live="polite">
@@ -565,7 +551,29 @@ export default function Home() {
             <article><span>Features</span><strong>{annotations.length}</strong><small>{customAnnotations.length ? `${data.features.length} from file · ${customAnnotations.length} added` : "annotations found"}</small></article>
           </div>
 
-          <PlasmidMap fileName={fileName} sequence={data.sequence} circular={data.circular} features={annotations} />
+          <section className="primary-workspace" aria-labelledby="primary-workspace-heading">
+            <div className="primary-workspace-heading">
+              <div>
+                <span className="panel-kicker">SEQUENCE WORKSPACE</span>
+                <h3 id="primary-workspace-heading">Map and bases, side by side</h3>
+              </div>
+              <div className="workspace-view-controls" role="group" aria-label="Workspace view">
+                {(["split", "sequence", "plasmid"] as const).map((view) => (
+                  <button type="button" className={workspaceView === view ? "active" : ""} aria-pressed={workspaceView === view} onClick={() => setWorkspaceView(view)} key={view}>
+                    {view === "split" ? "Split" : view === "sequence" ? "Sequence" : "Plasmid"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className={`primary-workspace-panes ${workspaceView}`}>
+              <div className="primary-workspace-pane sequence-pane" hidden={workspaceView === "plasmid"}>
+                <SequenceEditor sequence={data.sequence} circular={data.circular} features={annotations} primers={data.primers} motif={motif} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} onMotifChange={setMotif} onSaveAnnotation={saveInlineAnnotation} onRemoveAnnotation={(featureIndex) => removeAnnotation(annotations[featureIndex])} />
+              </div>
+              <div className="primary-workspace-pane plasmid-pane" hidden={workspaceView === "sequence"}>
+                <PlasmidMap fileName={fileName} sequence={data.sequence} circular={data.circular} features={annotations} />
+              </div>
+            </div>
+          </section>
 
           <section className="annotation-section" id="annotations" aria-labelledby="annotation-heading">
             <div className="annotation-header">
@@ -617,13 +625,11 @@ export default function Home() {
             <p className="session-note">Changes are autosaved on this device. Export a DOTDNA project or GenBank file for a portable copy.</p>
           </section>
 
-          <AnalysisPanels key={fileName} sequence={data.sequence} circular={data.circular} onCreateCds={createCdsFromOrf} />
+          <AnalysisPanels key={fileName} sequence={data.sequence} circular={data.circular} annotations={annotations} onCreateCds={createCdsFromOrf} />
 
           <MolecularTools key={`${fileName}-molecular`} fileName={fileName} sequence={data.sequence} circular={data.circular} primers={data.primers} onPrimersChange={changePrimers} />
 
           <DesignVerifyTools key={`${fileName}-design`} fileName={fileName} sequence={data.sequence} circular={data.circular} features={annotations} onOpenProduct={openAssemblyProduct} />
-
-          <SequenceEditor sequence={data.sequence} circular={data.circular} features={annotations} primers={data.primers} motif={motif} canUndo={undoStack.length > 0} canRedo={redoStack.length > 0} history={history} onApply={applyEdit} onUndo={undo} onRedo={redo} onTopologyChange={changeTopology} onMotifChange={setMotif} onSaveAnnotation={saveInlineAnnotation} onRemoveAnnotation={(featureIndex) => removeAnnotation(annotations[featureIndex])} />
 
           <DocumentInspector data={data} />
         </section>
@@ -643,7 +649,7 @@ export default function Home() {
 
       <footer>
         <a className="brand footer-brand" href="#top">DOTDNA</a>
-        <p>Private sequence work, in your browser.</p>
+        <p>Private sequence work, saved on your device.</p>
         <p className="footer-tech">.dna · GenBank · FASTA · DOTDNA</p>
       </footer>
     </main>

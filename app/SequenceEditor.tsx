@@ -4,7 +4,7 @@ import type { CSSProperties, ClipboardEvent, FormEvent, KeyboardEvent, MouseEven
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildAnnotatedSequenceRows, featuresOverlappingRange, motifBasePositions } from "./annotated-sequence";
 import type { SequenceOverlay } from "./annotated-sequence";
-import { findPrimerBindings } from "./molecular-biology";
+import { analyzePrimer, findPrimerBindings } from "./molecular-biology";
 import { SequenceEdit } from "./sequence-edit";
 import { findOpenReadingFrames, findRestrictionSites, RESTRICTION_ENZYMES } from "./sequence-analysis";
 import type { SnapGeneFeature, SnapGenePrimer } from "./snapgene";
@@ -146,6 +146,17 @@ export function SequenceEditor({
   const rows = useMemo(() => buildAnnotatedSequenceRows(sequence, showFeatures ? features : [], lineWidth, overlays), [sequence, showFeatures, features, overlays]);
   const motifPositions = useMemo(() => motifBasePositions(sequence, motif), [sequence, motif]);
   const selectedText = selection ? sequence.slice(selection.start - 1, selection.end) : "";
+  const selectedStats = useMemo(() => {
+    if (!selectedText) return null;
+    const canonicalLength = selectedText.match(/[ACGT]/g)?.length ?? 0;
+    const gcBases = selectedText.match(/[GC]/g)?.length ?? 0;
+    let meltingTemperature: number | null = null;
+    if (/^[ACGT]+$/.test(selectedText)) meltingTemperature = analyzePrimer(selectedText).meltingTemperature;
+    return {
+      gcPercent: canonicalLength ? (gcBases / canonicalLength) * 100 : 0,
+      meltingTemperature,
+    };
+  }, [selectedText]);
   const selectedFeatures = useMemo(
     () => selection ? featuresOverlappingRange(features, sequence.length, selection.start, selection.end) : [],
     [features, selection, sequence.length],
@@ -488,7 +499,9 @@ export function SequenceEditor({
           <div>
             <span>{selection ? "SELECTION" : "INSERTION CARET"}</span>
             <strong>{selection ? `${numberFormatter.format(selection.start)}–${numberFormatter.format(selection.end)}` : numberFormatter.format(caret)}</strong>
-            <small>{selection ? `${numberFormatter.format(selectedText.length)} bp` : "Click a base edge to reposition"}</small>
+            <small>{selection
+              ? `${numberFormatter.format(selectedText.length)} bp · ${selectedStats?.gcPercent.toFixed(1)}% GC${selectedStats?.meltingTemperature === null ? "" : ` · ${selectedStats?.meltingTemperature.toFixed(1)}°C Tm`}`
+              : "Click a base edge to reposition"}</small>
           </div>
           <code>{selection ? `${selectedText.slice(0, 80)}${selectedText.length > 80 ? "…" : ""}` : "Drag across bases to select · Shift-click extends · keyboard shortcuts work here"}</code>
           <div className="selection-feature-chips">
@@ -551,13 +564,15 @@ export function SequenceEditor({
                     const baseAnnotations = row.annotations.filter((annotation) => annotation.start <= position && annotation.end >= position);
                     const annotationColor = baseAnnotations.filter(({ kind }) => kind !== "restriction").at(-1)?.color;
                     const selected = Boolean(selection && position >= selection.start && position <= selection.end);
+                    const selectionStart = selected && (position === selection?.start || localIndex === 0);
+                    const selectionEnd = selected && (position === selection?.end || position === row.end);
                     const caretBefore = !selection && caret === position;
                     const caretAfter = !selection && caret === sequence.length + 1 && position === sequence.length;
                     const style = annotationColor ? { "--base-annotation-color": annotationColor } as CSSProperties : undefined;
                     return (
                       <span
                         key={position}
-                        className={`sequence-base base-${base.toLowerCase()} ${annotationColor ? "annotated" : ""} ${motifPositions.has(position) ? "motif-hit" : ""} ${selected ? "selected" : ""} ${caretBefore ? "caret-before" : ""} ${caretAfter ? "caret-after" : ""} ${localIndex > 0 && localIndex % 10 === 0 ? "group-start" : ""}`}
+                        className={`sequence-base base-${base.toLowerCase()} ${annotationColor ? "annotated" : ""} ${motifPositions.has(position) ? "motif-hit" : ""} ${selected ? "selected" : ""} ${selectionStart ? "selection-start" : ""} ${selectionEnd ? "selection-end" : ""} ${caretBefore ? "caret-before" : ""} ${caretAfter ? "caret-after" : ""} ${localIndex > 0 && localIndex % 10 === 0 ? "group-start" : ""}`}
                         style={style}
                         title={`${position} · ${base}${baseAnnotations.length ? ` · ${baseAnnotations.map(({ name }) => name).join(", ")}` : ""}`}
                         onMouseDown={(event) => handleBaseMouseDown(event, position)}
@@ -599,7 +614,7 @@ export function SequenceEditor({
           <span className="editor-label">WHOLE-SEQUENCE ACTIONS</span>
           <button type="button" onClick={() => onApply({ kind: "reverse-complement" })}><span>⇄</span><div><strong>Reverse complement</strong><small>Flip bases and remap feature strands</small></div></button>
           <button type="button" onClick={() => onTopologyChange(!circular)}><span>○</span><div><strong>{circular ? "Linearize sequence" : "Circularize sequence"}</strong><small>Change topology without changing bases</small></div></button>
-          <div className="editor-safety"><i />Edits stay in this session until you download a DOTDNA project or sequence file.</div>
+          <div className="editor-safety"><i />Every committed edit is autosaved on this device for crash recovery.</div>
         </aside>
 
         <aside className="history-panel">
