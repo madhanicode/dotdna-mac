@@ -20,10 +20,12 @@ type Props = {
   sequence: string;
   circular: boolean;
   features: SnapGeneFeature[];
+  activeTab: DesignTab;
+  onActiveTabChange: (tab: DesignTab) => void;
   onOpenProduct: (result: AssemblyResult, name: string) => void;
 };
 
-type DesignTab = "assembly" | "alignment";
+export type DesignTab = "assembly" | "alignment";
 type AssemblyMethod = "overlap" | "restriction" | "golden-gate";
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -43,9 +45,8 @@ function endLabel(end?: CloningEnd) {
   return end.polarity === "blunt" ? `${end.enzyme} blunt` : `${end.enzyme} ${end.polarity} ${end.overhang}`;
 }
 
-export function DesignVerifyTools({ fileName, sequence, circular, features, onOpenProduct }: Props) {
+export function DesignVerifyTools({ fileName, sequence, circular, features, activeTab: tab, onActiveTabChange, onOpenProduct }: Props) {
   const stem = fileName.replace(/\.[^.]+$/, "") || "sequence";
-  const [tab, setTab] = useState<DesignTab>("assembly");
   const [assemblyMethod, setAssemblyMethod] = useState<AssemblyMethod>("overlap");
   const [assemblyName, setAssemblyName] = useState(`${stem}_assembly`);
   const [assemblyInput, setAssemblyInput] = useState("");
@@ -135,8 +136,8 @@ export function DesignVerifyTools({ fileName, sequence, circular, features, onOp
           <h3 id="design-verify-heading">Build and check constructs</h3>
         </div>
         <div className="tool-tabs" role="tablist" aria-label="Assembly and verification tools">
-          <button type="button" role="tab" aria-selected={tab === "assembly"} className={tab === "assembly" ? "active" : ""} onClick={() => setTab("assembly")}>Assembly</button>
-          <button type="button" role="tab" aria-selected={tab === "alignment"} className={tab === "alignment" ? "active" : ""} onClick={() => setTab("alignment")}>Alignment</button>
+          <button type="button" role="tab" aria-selected={tab === "assembly"} className={tab === "assembly" ? "active" : ""} onClick={() => onActiveTabChange("assembly")}>Assembly</button>
+          <button type="button" role="tab" aria-selected={tab === "alignment"} className={tab === "alignment" ? "active" : ""} onClick={() => onActiveTabChange("alignment")}>Alignment</button>
         </div>
       </div>
 

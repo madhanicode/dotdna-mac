@@ -3,10 +3,10 @@
 import { useMemo, useState } from "react";
 import { sortOrfs, sortRestrictionRows } from "./analysis-sort";
 import type { OrfSortKey, RestrictionSortKey, SortDirection } from "./analysis-sort";
-import { featureMatchesOrf } from "./orf-annotations";
+import { featureMatchesOrf, isOrfAnnotationStale } from "./orf-annotations";
+import { nextSort, SortableTableHeader } from "./SortableTableHeader";
+import type { SortState } from "./SortableTableHeader";
 import {
-  findOpenReadingFrames,
-  findRestrictionSites,
   OpenReadingFrame,
   OrfStartMode,
   RESTRICTION_ENZYMES,
@@ -14,16 +14,27 @@ import {
   simulateRestrictionDigest,
 } from "./sequence-analysis";
 import type { SnapGeneFeature } from "./snapgene";
+import { useSequenceAnalysis } from "./useSequenceAnalysis";
 
 type Props = {
   sequence: string;
   circular: boolean;
   annotations?: SnapGeneFeature[];
+  preferences: AnalysisPreferences;
+  onPreferencesChange: (preferences: AnalysisPreferences) => void;
+  onNavigate?: (start: number, end: number) => void;
   onCreateCds?: (orf: OpenReadingFrame) => void;
 };
 
 type CutterMode = "all" | "unique" | "double" | "type-iis";
-type SortState<Key extends string> = { key: Key; direction: SortDirection };
+export type AnalysisPreferences = {
+  minimumAminoAcids: number;
+  startMode: OrfStartMode;
+  enzymeQuery: string;
+  cutterMode: CutterMode;
+  orfSort: SortState<OrfSortKey>;
+  restrictionSort: SortState<RestrictionSortKey>;
+};
 
 const numberFormatter = new Intl.NumberFormat("en-US");
 const frames = [1, 2, 3, -1, -2, -3] as const;
@@ -50,39 +61,11 @@ function gelPosition(fragmentLength: number, maximumLength: number) {
   return 10 + ratio * 80;
 }
 
-function SortableTableHeader({ label, active, direction, onSort }: { label: string; active: boolean; direction: SortDirection; onSort: () => void }) {
-  return (
-    <th aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"}>
-      <button type="button" className={`table-sort-button ${active ? "active" : ""}`} onClick={onSort} title={`Sort by ${label}`}>
-        {label}<span aria-hidden="true">{active ? (direction === "asc" ? "↑" : "↓") : "↕"}</span>
-      </button>
-    </th>
-  );
-}
-
-function nextSort<Key extends string>(current: SortState<Key>, key: Key, defaultDirection: SortDirection) {
-  return current.key === key
-    ? { key, direction: current.direction === "asc" ? "desc" : "asc" } satisfies SortState<Key>
-    : { key, direction: defaultDirection } satisfies SortState<Key>;
-}
-
-export function AnalysisPanels({ sequence, circular, annotations = [], onCreateCds }: Props) {
-  const [minimumAminoAcids, setMinimumAminoAcids] = useState(50);
-  const [startMode, setStartMode] = useState<OrfStartMode>("atg");
-  const [enzymeQuery, setEnzymeQuery] = useState("");
-  const [cutterMode, setCutterMode] = useState<CutterMode>("all");
+export function AnalysisPanels({ sequence, circular, annotations = [], preferences, onPreferencesChange, onNavigate, onCreateCds }: Props) {
+  const { minimumAminoAcids, startMode, enzymeQuery, cutterMode, orfSort, restrictionSort } = preferences;
   const [selectedDigestEnzymes, setSelectedDigestEnzymes] = useState<string[]>([]);
-  const [orfSort, setOrfSort] = useState<SortState<OrfSortKey>>({ key: "length", direction: "desc" });
-  const [restrictionSort, setRestrictionSort] = useState<SortState<RestrictionSortKey>>({ key: "enzyme", direction: "asc" });
 
-  const orfs = useMemo(
-    () => findOpenReadingFrames(sequence, { minAminoAcids: minimumAminoAcids, startMode, circular }),
-    [sequence, minimumAminoAcids, startMode, circular],
-  );
-  const restrictionSites = useMemo(
-    () => findRestrictionSites(sequence, RESTRICTION_ENZYMES, circular),
-    [sequence, circular],
-  );
+  const { orfs, restrictionSites, pending: analysisPending } = useSequenceAnalysis(sequence, { circular, minimumAminoAcids, startMode });
   const enzymeRows = useMemo(() => {
     const grouped = new Map<string, RestrictionSite[]>();
     for (const site of restrictionSites) {
@@ -127,11 +110,11 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
   }
 
   function updateOrfSort(key: OrfSortKey, defaultDirection: SortDirection = "asc") {
-    setOrfSort((current) => nextSort(current, key, defaultDirection));
+    onPreferencesChange({ ...preferences, orfSort: nextSort(orfSort, key, defaultDirection) });
   }
 
   function updateRestrictionSort(key: RestrictionSortKey, defaultDirection: SortDirection = "asc") {
-    setRestrictionSort((current) => nextSort(current, key, defaultDirection));
+    onPreferencesChange({ ...preferences, restrictionSort: nextSort(restrictionSort, key, defaultDirection) });
   }
 
   return (
@@ -155,11 +138,11 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
             <div className="analysis-controls">
               <label>
                 <span>Minimum</span>
-                <div className="unit-input"><input type="number" min="5" max="5000" value={minimumAminoAcids} onChange={(event) => setMinimumAminoAcids(Math.max(5, Number(event.target.value) || 5))} /><b>aa</b></div>
+                <div className="unit-input"><input type="number" min="5" max="5000" value={minimumAminoAcids} onChange={(event) => onPreferencesChange({ ...preferences, minimumAminoAcids: Math.max(5, Number(event.target.value) || 5) })} /><b>aa</b></div>
               </label>
               <label>
                 <span>Start codons</span>
-                <select value={startMode} onChange={(event) => setStartMode(event.target.value as OrfStartMode)}>
+                <select value={startMode} onChange={(event) => onPreferencesChange({ ...preferences, startMode: event.target.value as OrfStartMode })}>
                   <option value="atg">ATG only</option>
                   <option value="common">ATG, GTG, TTG</option>
                 </select>
@@ -169,6 +152,7 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
 
           <div className="analysis-summary">
             <strong>{orfs.length}</strong><span>ORFs found</span>
+            {analysisPending && <span className="analysis-pending">Analyzing…</span>}
             <i className="summary-dot forward" /><span>{forwardCount} forward</span>
             <i className="summary-dot reverse" /><span>{reverseCount} reverse</span>
           </div>
@@ -180,17 +164,19 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
                 <b>{frame > 0 ? `+${frame}` : frame}</b>
                 <div className="orf-rail">
                   {orfs.filter((orf) => orf.frame === frame).map((orf) => {
-                    const annotated = annotations.some((feature) => featureMatchesOrf(feature, orf, sequence.length));
+                    const matchingFeature = annotations.find((feature) => featureMatchesOrf(feature, orf, sequence.length));
+                    const annotated = Boolean(matchingFeature);
+                    const stale = matchingFeature ? isOrfAnnotationStale(matchingFeature, sequence) : false;
                     return spanSegments(orf.start, orf.end, orf.wrapsOrigin, sequence.length).map((segment, index) => (
                       <button
                         type="button"
-                        className={`orf-bar ${orf.strand === "+" ? "forward" : "reverse"} ${annotated ? "annotated" : ""}`}
+                        className={`orf-bar ${orf.strand === "+" ? "forward" : "reverse"} ${annotated ? "annotated" : ""} ${stale ? "stale" : ""}`}
                         key={`${orf.id}-${index}`}
                         style={{ left: `${segment.left}%`, width: `${Math.max(segment.width, 0.45)}%` }}
-                        title={`${annotated ? "Annotated CDS" : "Create CDS annotation"} · Frame ${frame > 0 ? "+" : ""}${frame} · ${rangeLabel(orf)} · ${orf.aminoAcidLength} aa`}
-                        aria-label={`${annotated ? "Annotated CDS" : "Create CDS annotation"} for ORF frame ${frame > 0 ? "+" : ""}${frame}, ${rangeLabel(orf)}`}
-                        onClick={() => { if (!annotated) onCreateCds?.(orf); }}
-                        disabled={annotated || !onCreateCds}
+                        title={`${stale ? "Annotation needs review" : annotated ? "Annotated CDS" : "Create CDS annotation"} · Frame ${frame > 0 ? "+" : ""}${frame} · ${rangeLabel(orf)} · ${orf.aminoAcidLength} aa`}
+                        aria-label={`${stale ? "Annotation needs review" : annotated ? "Annotated CDS" : "Create CDS annotation"} for ORF frame ${frame > 0 ? "+" : ""}${frame}, ${rangeLabel(orf)}`}
+                        onClick={() => { if (annotated) onNavigate?.(orf.start, orf.end); else onCreateCds?.(orf); }}
+                        disabled={!onCreateCds && !onNavigate}
                       />
                     ));
                   })}
@@ -209,17 +195,19 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
                 {onCreateCds && <th>Annotation</th>}
               </tr></thead>
               <tbody>
-                {displayedOrfs.map((orf) => (
-                  <tr key={orf.id}>
+                {displayedOrfs.map((orf) => {
+                  const matchingFeature = annotations.find((feature) => featureMatchesOrf(feature, orf, sequence.length));
+                  const stale = matchingFeature ? isOrfAnnotationStale(matchingFeature, sequence) : false;
+                  return <tr key={orf.id}>
                     <td><span className={`strand-pill ${orf.strand === "+" ? "forward" : "reverse"}`}>{orf.frame > 0 ? `+${orf.frame}` : orf.frame}</span></td>
-                    <td>{rangeLabel(orf)}</td>
+                    <td><button type="button" className="table-range-button" onClick={() => onNavigate?.(orf.start, orf.end)}>{rangeLabel(orf)}</button></td>
                     <td>{numberFormatter.format(orf.aminoAcidLength)} aa</td>
                     <td className="protein-preview">{orf.protein.slice(0, 18)}{orf.protein.length > 18 ? "…" : ""}</td>
-                    {onCreateCds && <td>{annotations.some((feature) => featureMatchesOrf(feature, orf, sequence.length))
-                      ? <button type="button" className="orf-annotation-button annotated" disabled>Annotated ✓</button>
+                    {onCreateCds && <td>{matchingFeature
+                      ? <button type="button" className={`orf-annotation-button annotated ${stale ? "stale" : ""}`} onClick={() => onNavigate?.(orf.start, orf.end)}>{stale ? "Review needed" : "Annotated ✓"}</button>
                       : <button type="button" className="orf-annotation-button" onClick={() => onCreateCds(orf)}>Create CDS</button>}</td>}
-                  </tr>
-                ))}
+                  </tr>;
+                })}
               </tbody>
             </table>
             {!orfs.length && <p className="analysis-empty">No complete ORFs meet these criteria.</p>}
@@ -237,11 +225,11 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
             <div className="analysis-controls restriction-controls">
               <label>
                 <span>Find enzyme</span>
-                <input value={enzymeQuery} onChange={(event) => setEnzymeQuery(event.target.value)} placeholder="EcoRI or GAATTC" />
+                <input value={enzymeQuery} onChange={(event) => onPreferencesChange({ ...preferences, enzymeQuery: event.target.value })} placeholder="EcoRI or GAATTC" />
               </label>
               <label>
                 <span>Show</span>
-                <select value={cutterMode} onChange={(event) => setCutterMode(event.target.value as CutterMode)}>
+                <select value={cutterMode} onChange={(event) => onPreferencesChange({ ...preferences, cutterMode: event.target.value as CutterMode })}>
                   <option value="all">All cutters</option>
                   <option value="unique">Unique cutters</option>
                   <option value="double">Two cutters</option>
@@ -253,6 +241,7 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
 
           <div className="analysis-summary">
             <strong>{visibleSites.length}</strong><span>visible sites</span>
+            {analysisPending && <span className="analysis-pending">Analyzing…</span>}
             <i className="summary-dot enzyme" /><span>{visibleEnzymeRows.length} enzymes cut</span>
             <span className="noncutter-count">{RESTRICTION_ENZYMES.length - enzymeRows.length} noncutters</span>
           </div>
@@ -261,11 +250,14 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
             <div className="analysis-scale"><span>1</span><span>{numberFormatter.format(Math.round(sequence.length / 2))}</span><span>{numberFormatter.format(sequence.length)} bp</span></div>
             <div className="restriction-rail">
               {visibleSites.map((site) => (
-                <span
+                <button
+                  type="button"
                   className={`restriction-marker ${site.enzyme.kind === "Type IIS" ? "type-iis" : ""}`}
                   key={site.id}
                   style={{ left: `${((site.position - 1) / sequence.length) * 100}%` }}
                   title={`${site.enzyme.name} · ${site.enzyme.recognition} · ${site.position}${site.strand === "-" ? " · reverse" : ""}`}
+                  aria-label={`Select ${site.enzyme.name} site at ${site.position}`}
+                  onClick={() => onNavigate?.(site.position, site.end)}
                 />
               ))}
             </div>
@@ -287,7 +279,7 @@ export function AnalysisPanels({ sequence, circular, annotations = [], onCreateC
                     <td><strong>{enzyme.name}</strong>{enzyme.kind === "Type IIS" && <span className="type-tag">IIS</span>}</td>
                     <td className="recognition-sequence">{enzyme.recognition}</td>
                     <td>{sites.length}</td>
-                    <td className="coordinate-list">{sites.slice(0, 6).map(({ position }) => numberFormatter.format(position)).join(", ")}{sites.length > 6 ? ` +${sites.length - 6}` : ""}</td>
+                    <td className="coordinate-list">{sites.slice(0, 6).map(({ position, end }, index) => <button type="button" key={`${position}-${index}`} onClick={() => onNavigate?.(position, end)}>{numberFormatter.format(position)}</button>)}{sites.length > 6 ? ` +${sites.length - 6}` : ""}</td>
                   </tr>
                 ))}
               </tbody>

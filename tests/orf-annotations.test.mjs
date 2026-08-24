@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createOrfCdsFeature, featureMatchesOrf, ORF_ID_QUALIFIER } from "../app/orf-annotations.ts";
+import { acknowledgeOrfAnnotation, createOrfCdsFeature, detachOrfAnnotation, featureMatchesOrf, isOrfAnnotation, isOrfAnnotationStale, ORF_ID_QUALIFIER } from "../app/orf-annotations.ts";
 
 const orf = {
   id: "+-1-3-15",
@@ -32,4 +32,15 @@ test("recognizes existing coordinate-matched CDS annotations and origin-spanning
   const feature = createOrfCdsFeature(wrapping, 30);
   assert.deepEqual(feature.segments.map(({ start, end }) => [start, end]), [[25, 30], [1, 6]]);
   assert.equal(featureMatchesOrf(feature, wrapping, 30), true);
+});
+
+test("marks sequence-derived ORF annotations stale until reviewed, refreshed, or detached", () => {
+  const original = "ATGAAAACCTAATTTTTTTTTTTTTTTTTT";
+  const feature = createOrfCdsFeature(orf, original.length, original, { minimumAminoAcids: 3, startMode: "atg" });
+  assert.equal(isOrfAnnotation(feature), true);
+  assert.equal(isOrfAnnotationStale(feature, original), false);
+  assert.equal(isOrfAnnotationStale(feature, `${original.slice(0, -1)}A`), true);
+  const reviewed = acknowledgeOrfAnnotation(feature, `${original.slice(0, -1)}A`);
+  assert.equal(isOrfAnnotationStale(reviewed, `${original.slice(0, -1)}A`), false);
+  assert.equal(isOrfAnnotation(detachOrfAnnotation(feature)), false);
 });

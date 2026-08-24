@@ -14,16 +14,23 @@ import {
   translateReadingFrame,
 } from "./molecular-biology";
 import { SnapGenePrimer, toFasta } from "./snapgene";
+import { nextSort, SortableTableHeader } from "./SortableTableHeader";
+import type { SortState } from "./SortableTableHeader";
 
 type Props = {
   fileName: string;
   sequence: string;
   circular: boolean;
   primers: SnapGenePrimer[];
+  activeTab: ToolTab;
+  primerSort: SortState<PrimerSortKey>;
+  onActiveTabChange: (tab: ToolTab) => void;
+  onPrimerSortChange: (sort: SortState<PrimerSortKey>) => void;
   onPrimersChange: (primers: SnapGenePrimer[], description: string) => void;
 };
 
-type ToolTab = "primers" | "design" | "pcr" | "translation";
+export type ToolTab = "primers" | "design" | "pcr" | "translation";
+export type PrimerSortKey = "name" | "sequence" | "length" | "tm" | "gc" | "bindings";
 type ReadingFrame = 1 | 2 | 3 | -1 | -2 | -3;
 type PcrMode = "standard" | "inverse" | "overlap-extension";
 
@@ -43,8 +50,7 @@ function safePrimerAnalysis(sequence: string, bindingLength?: number) {
   try { return analyzePrimer(sequence, { bindingLength }); } catch { return null; }
 }
 
-export function MolecularTools({ fileName, sequence, circular, primers, onPrimersChange }: Props) {
-  const [tab, setTab] = useState<ToolTab>("primers");
+export function MolecularTools({ fileName, sequence, circular, primers, activeTab: tab, primerSort, onActiveTabChange, onPrimerSortChange, onPrimersChange }: Props) {
   const [primerName, setPrimerName] = useState("");
   const [primerSequence, setPrimerSequence] = useState("");
   const [primerTail, setPrimerTail] = useState("");
@@ -116,6 +122,24 @@ export function MolecularTools({ fileName, sequence, circular, primers, onPrimer
       });
     } catch { return null; }
   }, [sequence, circular, primers, forwardPrimer, reversePrimer, internalReversePrimer, internalForwardPrimer, pcrMode]);
+  const sortedPrimerRows = useMemo(() => {
+    const rows = primers.map((primer, index) => {
+      const analysis = safePrimerAnalysis(primer.sequence, primer.bindingLength);
+      const bindings = analysis ? findPrimerBindings(sequence, primer.sequence, circular, { bindingLength: primer.bindingLength }) : [];
+      return { primer, index, analysis, bindings };
+    });
+    return rows.sort((left, right) => {
+      const key = primerSort.key;
+      let comparison = 0;
+      if (key === "name") comparison = left.primer.name.localeCompare(right.primer.name);
+      if (key === "sequence") comparison = left.primer.sequence.localeCompare(right.primer.sequence);
+      if (key === "length") comparison = (left.analysis?.length ?? -1) - (right.analysis?.length ?? -1);
+      if (key === "tm") comparison = (left.analysis?.meltingTemperature ?? -1) - (right.analysis?.meltingTemperature ?? -1);
+      if (key === "gc") comparison = (left.analysis?.gcPercent ?? -1) - (right.analysis?.gcPercent ?? -1);
+      if (key === "bindings") comparison = left.bindings.length - right.bindings.length;
+      return (primerSort.direction === "asc" ? comparison : -comparison) || left.primer.name.localeCompare(right.primer.name);
+    });
+  }, [primers, sequence, circular, primerSort]);
 
   function addPrimer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -214,10 +238,10 @@ export function MolecularTools({ fileName, sequence, circular, primers, onPrimer
           <h3 id="molecular-heading">Routine molecular tools</h3>
         </div>
         <div className="tool-tabs" role="tablist" aria-label="Molecular biology tools">
-          <button type="button" role="tab" aria-selected={tab === "primers"} className={tab === "primers" ? "active" : ""} onClick={() => setTab("primers")}>Primers</button>
-          <button type="button" role="tab" aria-selected={tab === "design"} className={tab === "design" ? "active" : ""} onClick={() => setTab("design")}>Design</button>
-          <button type="button" role="tab" aria-selected={tab === "pcr"} className={tab === "pcr" ? "active" : ""} onClick={() => setTab("pcr")}>PCR</button>
-          <button type="button" role="tab" aria-selected={tab === "translation"} className={tab === "translation" ? "active" : ""} onClick={() => setTab("translation")}>Translation</button>
+          <button type="button" role="tab" aria-selected={tab === "primers"} className={tab === "primers" ? "active" : ""} onClick={() => onActiveTabChange("primers")}>Primers</button>
+          <button type="button" role="tab" aria-selected={tab === "design"} className={tab === "design" ? "active" : ""} onClick={() => onActiveTabChange("design")}>Design</button>
+          <button type="button" role="tab" aria-selected={tab === "pcr"} className={tab === "pcr" ? "active" : ""} onClick={() => onActiveTabChange("pcr")}>PCR</button>
+          <button type="button" role="tab" aria-selected={tab === "translation"} className={tab === "translation" ? "active" : ""} onClick={() => onActiveTabChange("translation")}>Translation</button>
         </div>
       </div>
 
@@ -246,11 +270,12 @@ export function MolecularTools({ fileName, sequence, circular, primers, onPrimer
             {primers.length ? (
               <div className="primer-table-wrap">
                 <table className="primer-table">
-                  <thead><tr><th>Name</th><th>Sequence 5′→3′</th><th>Length</th><th>Tm</th><th>GC</th><th>Bindings</th><th /></tr></thead>
+                  <thead><tr>
+                    {([ ["name", "Name", "asc"], ["sequence", "Sequence 5′→3′", "asc"], ["length", "Length", "desc"], ["tm", "Tm", "desc"], ["gc", "GC", "desc"], ["bindings", "Bindings", "desc"] ] as const).map(([key, label, direction]) => <SortableTableHeader key={key} label={label} active={primerSort.key === key} direction={primerSort.direction} onSort={() => onPrimerSortChange(nextSort(primerSort, key, direction))} />)}
+                    <th />
+                  </tr></thead>
                   <tbody>
-                    {primers.map((primer, index) => {
-                      const analysis = safePrimerAnalysis(primer.sequence, primer.bindingLength);
-                      const bindings = analysis ? findPrimerBindings(sequence, primer.sequence, circular, { bindingLength: primer.bindingLength }) : [];
+                    {sortedPrimerRows.map(({ primer, index, analysis, bindings }) => {
                       return (
                         <tr key={`${primer.name}-${index}`}>
                           <td><strong>{primer.name}</strong></td>

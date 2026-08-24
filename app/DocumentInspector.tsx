@@ -1,7 +1,16 @@
+"use client";
+
+import { useMemo } from "react";
 import { SnapGeneData } from "./snapgene";
+import { nextSort, SortableTableHeader } from "./SortableTableHeader";
+import type { SortState } from "./SortableTableHeader";
+
+export type PacketSortKey = "index" | "name" | "type" | "format" | "size" | "status";
 
 type Props = {
   data: SnapGeneData;
+  packetSort: SortState<PacketSortKey>;
+  onPacketSortChange: (sort: SortState<PacketSortKey>) => void;
 };
 
 const numberFormatter = new Intl.NumberFormat("en-US");
@@ -15,8 +24,18 @@ function formatDate(date: string | null, utc: string | null) {
   return utc ? `${date} · ${utc} UTC` : date;
 }
 
-export function DocumentInspector({ data }: Props) {
+export function DocumentInspector({ data, packetSort, onPacketSortChange }: Props) {
   const decodedPackets = data.packets.filter(({ decoded }) => decoded).length;
+  const sortedPackets = useMemo(() => [...data.packets].sort((left, right) => {
+    let comparison = 0;
+    if (packetSort.key === "index") comparison = left.index - right.index;
+    if (packetSort.key === "name") comparison = left.name.localeCompare(right.name);
+    if (packetSort.key === "type") comparison = left.hexType.localeCompare(right.hexType);
+    if (packetSort.key === "format") comparison = left.format.localeCompare(right.format);
+    if (packetSort.key === "size") comparison = left.byteLength - right.byteLength;
+    if (packetSort.key === "status") comparison = Number(left.decoded) - Number(right.decoded);
+    return (packetSort.direction === "asc" ? comparison : -comparison) || left.index - right.index;
+  }), [data.packets, packetSort]);
 
   return (
     <section className="document-inspector" id="file-details" aria-labelledby="document-heading">
@@ -75,9 +94,11 @@ export function DocumentInspector({ data }: Props) {
         <summary><span>Packet manifest</span><small>See every section found in this file</small></summary>
         <div className="packet-table-wrap">
           <table className="packet-table">
-            <thead><tr><th>#</th><th>Packet</th><th>Type</th><th>Format</th><th>Size</th><th>Status</th></tr></thead>
+            <thead><tr>
+              {([ ["index", "#", "asc"], ["name", "Packet", "asc"], ["type", "Type", "asc"], ["format", "Format", "asc"], ["size", "Size", "desc"], ["status", "Status", "desc"] ] as const).map(([key, label, direction]) => <SortableTableHeader key={key} label={label} active={packetSort.key === key} direction={packetSort.direction} onSort={() => onPacketSortChange(nextSort(packetSort, key, direction))} />)}
+            </tr></thead>
             <tbody>
-              {data.packets.map((packet) => (
+              {sortedPackets.map((packet) => (
                 <tr key={`${packet.index}-${packet.type}`}>
                   <td>{packet.index + 1}</td>
                   <td><strong>{packet.name}</strong></td>

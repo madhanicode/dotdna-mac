@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { findRestrictionSites, RESTRICTION_ENZYMES } from "./sequence-analysis";
 import { SnapGeneFeature, SnapGeneSegment } from "./snapgene";
+import { useSequenceAnalysis } from "./useSequenceAnalysis";
 
 type MapFeature = Pick<SnapGeneFeature, "name" | "range" | "color"> & Partial<Pick<SnapGeneFeature, "segments" | "strand">>;
 
@@ -11,6 +11,8 @@ type Props = {
   sequence: string;
   circular: boolean;
   features: MapFeature[];
+  selectedRange?: { start: number; end: number } | null;
+  onSelectRange?: (start: number, end: number) => void;
 };
 
 type EnzymeDisplay = "unique" | "double" | "none";
@@ -41,11 +43,11 @@ function displayRange(feature: MapFeature) {
   return feature.range ?? "No coordinates";
 }
 
-export function PlasmidMap({ fileName, sequence, circular, features }: Props) {
+export function PlasmidMap({ fileName, sequence, circular, features, selectedRange, onSelectRange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [enzymeDisplay, setEnzymeDisplay] = useState<EnzymeDisplay>("unique");
   const [selectedFeature, setSelectedFeature] = useState(0);
-  const sites = useMemo(() => findRestrictionSites(sequence, RESTRICTION_ENZYMES, circular), [sequence, circular]);
+  const { restrictionSites: sites } = useSequenceAnalysis(sequence, { circular, includeOrfs: false });
   const enzymeRows = useMemo(() => {
     const grouped = new Map<string, typeof sites>();
     for (const site of sites) grouped.set(site.enzyme.name, [...(grouped.get(site.enzyme.name) ?? []), site]);
@@ -206,7 +208,7 @@ export function PlasmidMap({ fileName, sequence, circular, features }: Props) {
             {features.length ? (
               <div className="map-feature-buttons">
                 {features.map((feature, index) => (
-                  <button type="button" className={index === selectedFeature ? "active" : ""} key={`${feature.name}-${index}`} onClick={() => setSelectedFeature(index)}>
+                  <button type="button" className={index === selectedFeature ? "active" : ""} key={`${feature.name}-${index}`} onClick={() => { setSelectedFeature(index); const segment = segmentsFor(feature)[0]; if (segment?.start !== null && segment?.end !== null) onSelectRange?.(segment.start, segment.end); }}>
                     <i style={{ backgroundColor: feature.color ?? "#17b6c9" }} />
                     <span><strong>{feature.name}</strong><small>{displayRange(feature)}</small></span>
                   </button>
@@ -219,7 +221,7 @@ export function PlasmidMap({ fileName, sequence, circular, features }: Props) {
             {visibleEnzymes.length ? (
               <div className="map-enzyme-list">
                 {visibleEnzymes.map(({ name, sites: enzymeSites }) => (
-                  <span key={name}><strong>{name}</strong><small>{enzymeSites.map(({ position }) => numberFormatter.format(position)).join(", ")}</small></span>
+                  <button type="button" key={name} className={enzymeSites.some(({ position }) => selectedRange?.start === position) ? "active" : ""} onClick={() => onSelectRange?.(enzymeSites[0].position, enzymeSites[0].end)}><strong>{name}</strong><small>{enzymeSites.map(({ position }) => numberFormatter.format(position)).join(", ")}</small></button>
                 ))}
               </div>
             ) : <p>Restriction markers are hidden.</p>}

@@ -6,8 +6,8 @@ import { buildAnnotatedSequenceRows, featuresOverlappingRange, motifBasePosition
 import type { SequenceOverlay } from "./annotated-sequence";
 import { analyzePrimer, findPrimerBindings } from "./molecular-biology";
 import { SequenceEdit } from "./sequence-edit";
-import { findOpenReadingFrames, findRestrictionSites, RESTRICTION_ENZYMES } from "./sequence-analysis";
 import type { SnapGeneFeature, SnapGenePrimer } from "./snapgene";
+import { useSequenceAnalysis } from "./useSequenceAnalysis";
 
 type Props = {
   sequence: string;
@@ -18,6 +18,10 @@ type Props = {
   canUndo: boolean;
   canRedo: boolean;
   history: Array<{ description: string; timestamp: string }>;
+  navigation: SequenceNavigation;
+  initialScrollTop: number;
+  onNavigationChange: (navigation: SequenceNavigation) => void;
+  onScrollTopChange: (scrollTop: number) => void;
   onApply: (edit: SequenceEdit) => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -30,6 +34,7 @@ type Props = {
 type EditMode = "insert" | "replace" | "delete";
 type DirectInputAction = "insert" | "replace" | "paste";
 type BaseSelection = { start: number; end: number };
+export type SequenceNavigation = { selection: BaseSelection | null; caret: number };
 type RestrictionMode = "unique" | "double" | "all";
 type AnnotationDraft = { featureIndex: number | null; name: string; type: string; color: string; start: string; end: string };
 
@@ -64,6 +69,10 @@ export function SequenceEditor({
   canUndo,
   canRedo,
   history,
+  navigation,
+  initialScrollTop,
+  onNavigationChange,
+  onScrollTopChange,
   onApply,
   onUndo,
   onRedo,
@@ -73,6 +82,8 @@ export function SequenceEditor({
   onRemoveAnnotation,
 }: Props) {
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollTimeoutRef = useRef(0);
   const dragging = useRef(false);
   const dragAnchor = useRef(1);
   const dragMoved = useRef(false);
@@ -83,8 +94,8 @@ export function SequenceEditor({
   const [error, setError] = useState("");
   const [directError, setDirectError] = useState("");
   const [status, setStatus] = useState("");
-  const [selection, setSelection] = useState<BaseSelection | null>(null);
-  const [caret, setCaret] = useState(1);
+  const [selection, setSelection] = useState<BaseSelection | null>(navigation.selection);
+  const [caret, setCaret] = useState(navigation.caret);
   const [directInputAction, setDirectInputAction] = useState<DirectInputAction | null>(null);
   const [directInput, setDirectInput] = useState("");
   const [showFeatures, setShowFeatures] = useState(true);
@@ -92,6 +103,8 @@ export function SequenceEditor({
   const [showRestrictionSites, setShowRestrictionSites] = useState(false);
   const [showOrfs, setShowOrfs] = useState(false);
   const [showComplement, setShowComplement] = useState(true);
+  const navigationStart = navigation.selection?.start ?? null;
+  const navigationEnd = navigation.selection?.end ?? null;
   const [restrictionMode, setRestrictionMode] = useState<RestrictionMode>("unique");
   const [annotationDraft, setAnnotationDraft] = useState<AnnotationDraft | null>(null);
   const primerOverlays = useMemo<SequenceOverlay[]>(() => primers.flatMap((primer, primerIndex) => {
@@ -109,7 +122,7 @@ export function SequenceEditor({
       return [];
     }
   }), [primers, sequence, circular]);
-  const restrictionSites = useMemo(() => findRestrictionSites(sequence, RESTRICTION_ENZYMES, circular), [sequence, circular]);
+  const { orfs, restrictionSites } = useSequenceAnalysis(sequence, { circular, minimumAminoAcids: 50 });
   const restrictionSiteCounts = useMemo(() => {
     const counts = new Map<string, number>();
     restrictionSites.forEach((site) => counts.set(site.enzyme.name, (counts.get(site.enzyme.name) ?? 0) + 1));
@@ -121,7 +134,6 @@ export function SequenceEditor({
     if (restrictionMode === "unique") return count === 1;
     return count <= 2;
   }), [restrictionSites, restrictionSiteCounts, restrictionMode]);
-  const orfs = useMemo(() => findOpenReadingFrames(sequence, { minAminoAcids: 50, circular }), [sequence, circular]);
   const overlays = useMemo<SequenceOverlay[]>(() => [
     ...(showPrimers ? primerOverlays : []),
     ...(showRestrictionSites ? visibleRestrictionSites.map((site) => ({
@@ -166,8 +178,34 @@ export function SequenceEditor({
   useEffect(() => {
     const stopDragging = () => { dragging.current = false; };
     window.addEventListener("mouseup", stopDragging);
-    return () => window.removeEventListener("mouseup", stopDragging);
+    return () => {
+      window.removeEventListener("mouseup", stopDragging);
+      window.clearTimeout(scrollTimeoutRef.current);
+    };
   }, []);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const externalSelection = navigationStart !== null && navigationEnd !== null ? { start: navigationStart, end: navigationEnd } : null;
+      setSelection(externalSelection);
+      if (externalSelection) {
+        setStart(String(externalSelection.start));
+        setEnd(String(externalSelection.end));
+        const row = Math.floor((externalSelection.start - 1) / lineWidth);
+        scrollRef.current?.scrollTo({ top: Math.max(0, row * 92 - 92), behavior: "smooth" });
+      }
+      setCaret(navigation.caret);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [navigationStart, navigationEnd, navigation.caret]);
+
+  useEffect(() => {
+    onNavigationChange({ selection, caret });
+  }, [selection, caret, onNavigationChange]);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = initialScrollTop;
+  }, [initialScrollTop]);
 
   function flashStatus(message: string) {
     setStatus(message);
@@ -535,7 +573,11 @@ export function SequenceEditor({
         )}
         {directError && <p className="direct-editor-error" role="alert">{directError}</p>}
 
-        <div className="sequence-scroll-window">
+        <div ref={scrollRef} className="sequence-scroll-window" onScroll={(event) => {
+          window.clearTimeout(scrollTimeoutRef.current);
+          const scrollTop = event.currentTarget.scrollTop;
+          scrollTimeoutRef.current = window.setTimeout(() => onScrollTopChange(scrollTop), 250);
+        }}>
           <div className="sequence-ruler"><span /><div>{Array.from({ length: 6 }, (_, index) => <b key={index}>{index * 10 + 1}</b>)}</div></div>
           {rows.map((row) => (
             <div className="annotated-sequence-row" key={row.start}>
