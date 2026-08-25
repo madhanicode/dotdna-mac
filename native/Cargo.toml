@@ -1,0 +1,37 @@
+[workspace]
+members = [
+  "crates/dotdna-core",
+  "crates/dotdna-io",
+  "src-tauri",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+authors = ["madhanicode"]
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/madhanicode/dotdna-mac"
+
+[workspace.dependencies]
+roxmltree = "0.21"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = "2"
+tauri-build = "2"
+tauri-plugin-dialog = "2"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

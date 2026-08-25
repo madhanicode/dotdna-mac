@@ -1,4 +1,4 @@
-name: Build universal macOS DMG
+name: Build Apple Silicon DOTDNA
 
 on:
   workflow_dispatch:
@@ -27,46 +27,88 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: |
-            pnpm-lock.yaml
-            desktop/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install web dependencies
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install desktop dependencies
-        run: pnpm --dir desktop install --frozen-lockfile --ignore-workspace
-
-      - name: Build offline web bundle
-        run: pnpm run build:desktop-web
-
-      - name: Build universal DMG
+      - name: Test and build native frontend
         run: |
-          if [[ -z "$CSC_LINK" ]]; then
-            unset CSC_LINK CSC_KEY_PASSWORD
-            export CSC_IDENTITY_AUTO_DISCOVERY=false
-          fi
-          if [[ -z "$APPLE_ID" ]]; then
-            unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
-          fi
-          pnpm --dir desktop run dist:mac
-        env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          pnpm --dir native test
+          pnpm --dir native build
 
-      - name: Upload DMG artifact
+      - name: Verify Rust workspace
+        working-directory: native
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Require release signing and notarization secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$APPLE_CERTIFICATE"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/dotdna-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/dotdna-signing.keychain-db"
+          KEYCHAIN_PASSWORD="dotdna-ci-keychain"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Bundle Apple Silicon app and DMG
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm --dir native tauri:build
+
+      - name: Archive signed app bundle
+        run: |
+          APP_PATH="$(find native/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          /usr/bin/ditto -c -k --keepParent "$APP_PATH" native/target/aarch64-apple-darwin/release/bundle/macos/DOTDNA_app.zip
+
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: DOTDNA-macOS-universal
-          path: release/*.dmg
+          name: DOTDNA-macOS-Apple-Silicon
+          path: |
+            native/target/aarch64-apple-darwin/release/bundle/macos/DOTDNA_app.zip
+            native/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
       - name: Publish tagged release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*.dmg
+          files: native/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
           generate_release_notes: true

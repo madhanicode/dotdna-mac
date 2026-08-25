@@ -45,3 +45,9 @@ next-env.d.ts
 /release/
 /desktop/dist/
 /desktop/node_modules/
+/native/dist/
+/native/node_modules/
+/native/target/
+/native/src-tauri/gen/
+/native/src-tauri/icons/*
+!/native/src-tauri/icons/icon.icns

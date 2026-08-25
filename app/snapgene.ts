@@ -34,6 +34,8 @@ export type SnapGenePrimerBindingSite = {
 export type SnapGenePrimer = {
   name: string;
   sequence: string;
+  /** Length of the explicitly validated 3′ template-binding region. */
+  bindingLength?: number;
   description: string | null;
   color: string | null;
   phosphorylated: boolean;
@@ -223,6 +225,7 @@ function parsePrimers(xml: string) {
   const hybridizationAttributes = elements(xml, "HybridizationParams")[0]?.attributes ?? "";
   const primerSettings = { ...allAttributes(rootAttributes), ...allAttributes(hybridizationAttributes) };
   const primers = elements(xml, "Primer").map(({ attributes, body }): SnapGenePrimer => {
+    const sequence = (attribute(attributes, "sequence") ?? "").toUpperCase();
     const bindingSites = elements(body, "BindingSite").map(({ attributes: siteAttributes }) => {
       const range = attribute(siteAttributes, "location") ?? attribute(siteAttributes, "range") ?? "";
       const coordinates = parseRange(range);
@@ -234,7 +237,11 @@ function parsePrimers(xml: string) {
     });
     return {
       name: attribute(attributes, "name") ?? "Unnamed primer",
-      sequence: (attribute(attributes, "sequence") ?? "").toUpperCase(),
+      sequence,
+      bindingLength: bindingSites
+        .map(({ start, end }) => start !== null && end !== null ? Math.abs(end - start) + 1 : 0)
+        .filter((length) => length > 0 && length <= sequence.length)
+        .sort((left, right) => right - left)[0],
       description: attribute(attributes, "description") ? cleanText(attribute(attributes, "description") ?? "") : null,
       color: attribute(attributes, "color"),
       phosphorylated: ["1", "true"].includes((attribute(attributes, "phosphorylated") ?? attribute(attributes, "fivePrimePhosphorylated") ?? "").toLowerCase()),

@@ -25,7 +25,7 @@ This roadmap inventories SnapGene’s publicly documented capability surface and
 | Primers and PCR | Primer library, GC/Tm/MW calculations, exact forward/reverse binding, inward-facing PCR products, amplicon FASTA export, and heuristic PCR/sequencing primer-pair design | Mismatches/tails, secondary structure, richer thermodynamics, inverse/overlap PCR, mutagenesis |
 | Translation | Whole-sequence six-frame translation, protein FASTA export, and predicted ORF→CDS conversion | Genetic codes, translated feature editing, introns/frameshifts, and protein properties |
 | Interoperability | Opens SnapGene, GenBank, FASTA, plain DNA, and portable DOTDNA projects; exports FASTA, annotated GenBank, project JSON, map PNG, protein, and amplicon | EMBL/GFF/BED, additional vendor formats, SnapGene round-trip writing, batch conversion |
-| Assembly and verification | Ordered multi-fragment exact-overlap assembly with automatic reverse-complement orientation, circular closure, product export/opening, and deterministic global DNA alignment | Thermodynamic overlap design, feature propagation, local/semi-global alignment, trace/quality handling, and multiple alignment |
+| Assembly and verification | Ordered exact-overlap, restriction-cloning, and Golden Gate planners with automatic orientation, end-compatibility checks, actionable warnings, feature propagation, circular closure, product creation, and deterministic global DNA alignment | Thermodynamic overlap/ligation fidelity, reaction conditions and schematics, local/semi-global alignment, trace/quality handling, and multiple alignment |
 
 ## Complete capability inventory
 
@@ -194,7 +194,8 @@ Estimates are rough single-team engineering ranges and should be refined after t
 
 - Restriction/ligation, Gibson, NEBuilder, In-Fusion, Golden Gate, Gateway, TA/GC, and TOPO workflows.
 - Exact suffix-to-prefix multi-fragment assembly, automatic downstream-fragment orientation, circular closure, and product creation are now available as the deterministic foundation for Gibson/HiFi-style planning.
-- Fragment-end chemistry, compatibility engine, feature propagation, reaction schematics, warnings, and history records.
+- Restriction cloning and Golden Gate now select enzyme-defined fragments, model sticky/blunt ends, optimize orientation, flag incompatible/internal/ambiguous junctions, and propagate retained features into products.
+- Reaction-condition guidance, ligation-fidelity scoring, reaction schematics, and history records.
 - Deliverable: major in-silico cloning workflows with reproducible products.
 
 ### Phase 6 — gels, alignments, and sequencing verification (started; 8–12 weeks total)
@@ -228,8 +229,8 @@ Estimates are rough single-team engineering ranges and should be refined after t
 
 ## Immediate next sprint after the workspace expansion
 
-1. Add restriction cloning and Golden Gate planning with end-compatibility checks, orientation warnings, and feature propagation.
-2. Upgrade primer thermodynamics and add mismatches, tails, inverse PCR, overlap PCR, and mutagenesis workflows.
-3. Add translated-feature editing, intron-aware CDS display, alternate genetic codes, and protein properties.
-4. Extend verification to local/semi-global alignment, reverse-complement query selection, coverage tracks, and Sanger trace import.
+1. Upgrade primer thermodynamics and add mismatches, tails, inverse PCR, overlap PCR, and mutagenesis workflows.
+2. Add translated-feature editing, intron-aware CDS display, alternate genetic codes, and protein properties.
+3. Extend verification to local/semi-global alignment, reverse-complement query selection, coverage tracks, and Sanger trace import.
+4. Add cloning reaction conditions, ligation-fidelity scoring, reaction schematics, and operation history records.
 5. Synchronize the new sequence selection with map focus, add zoom/virtualization and translation/primer/restriction overlays, then decode history/alignment/display binary packets and introduce saved local project collections.

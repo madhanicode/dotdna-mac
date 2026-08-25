@@ -1,15 +1,19 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
-const { app, BrowserWindow, Menu, dialog, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, session, shell } = require("electron");
 const { spawn } = require("node:child_process");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
+const { createAddgeneService } = require("./addgene-service.cjs");
+const { createRecoveryStore } = require("./recovery-store.cjs");
 
 let mainWindow = null;
 let serverProcess = null;
 let appIsQuitting = false;
 let localOrigin = null;
+let recoveryStore = null;
+let addgeneService = null;
 
 function findOpenPort() {
   return new Promise((resolve, reject) => {
@@ -129,6 +133,7 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.cjs"),
       sandbox: true,
       webSecurity: true,
     },
@@ -152,6 +157,17 @@ async function createWindow() {
 }
 
 async function launch() {
+  recoveryStore = createRecoveryStore(path.join(app.getPath("userData"), "workspace-recovery.json"));
+  addgeneService = createAddgeneService({ credentialPath: path.join(app.getPath("userData"), "addgene-credentials.json"), safeStorage });
+  ipcMain.handle("dotdna:recovery:load", () => recoveryStore.load());
+  ipcMain.handle("dotdna:recovery:list", () => recoveryStore.list());
+  ipcMain.handle("dotdna:recovery:save", (_event, record) => recoveryStore.save(record));
+  ipcMain.handle("dotdna:recovery:clear", (_event, savedAt) => recoveryStore.clear(savedAt));
+  ipcMain.handle("dotdna:addgene:status", () => addgeneService.status());
+  ipcMain.handle("dotdna:addgene:configure", (_event, token) => addgeneService.configure(token));
+  ipcMain.handle("dotdna:addgene:clear", () => addgeneService.clear());
+  ipcMain.handle("dotdna:addgene:fetch-plasmid", (_event, plasmidId) => addgeneService.fetchPlasmid(plasmidId));
+
   const port = await findOpenPort();
   localOrigin = `http://127.0.0.1:${port}`;
   startLocalServer(port);

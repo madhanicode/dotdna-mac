@@ -27,6 +27,9 @@
     },
     "files": [
       "main.cjs",
+      "preload.cjs",
+      "recovery-store.cjs",
+      "addgene-service.cjs",
       "package.json"
     ],
     "extraResources": [
